@@ -1,7 +1,7 @@
 # Go Project Scaffold
 
-**Status:** ready
-**Worktree:** none
+**Status:** review
+**Worktree:** /Users/agusarias/workspace/todo-go-project-scaffold
 
 ## Goal
 Set up the `tmux-todo` Go project: module, repo layout separating the core task package
@@ -83,6 +83,18 @@ effects, no published API. The one machine-level action is upgrading the Go tool
   by an automated timing assertion — a wall-clock threshold in `go test` is flaky and would
   train everyone to ignore it.
 
+- **2026-08-19 (executor):** Added a `tdo doctor` command beyond the plan's `--version`
+  and `tui`. Without it the shipped binary never touches SQLite, so `otool -L` would prove
+  only that an unrelated binary lacks libsqlite3. `doctor` resolves the XDG path, opens the
+  database and reads `schema_version`, making the CGO_ENABLED=0 claim testable from the
+  artifact users actually run. Revision of the how, not the what.
+- **2026-08-19 (executor):** `store.DefaultPath()` (XDG data dir) lands in this task rather
+  than the store-and-migrations task, because `doctor` needs it. Still no task queries.
+- **2026-08-19 (executor):** DoD 6 was verified by scripting a real tmux session
+  (`new-session` + `capture-pane` + `send-keys q`) instead of a human watching a popup. The
+  `display-popup` overlay renders client-side and cannot be captured, so the popup framing
+  itself remains unverified — flagged in Evidence rather than claimed.
+
 ## Plan
 Approved at Checkpoint 1, 2026-08-19.
 
@@ -121,3 +133,138 @@ and exercised; no domain logic that belongs to a downstream task.
 
 **Out of scope:** task CRUD, scope resolution, migrations beyond `schema_version`, real
 popup UI.
+
+## Evidence
+
+Executed 2026-08-19 in worktree `/Users/agusarias/workspace/todo-go-project-scaffold`
+(branch `go-project-scaffold`, now merged and removed).
+
+**Merge commit: `abbc3e3`** — fast-forward onto `main`, 16 files, 851 insertions.
+Not pushed. Review with `git show abbc3e3`.
+
+### Toolchain, format, vet, tests
+
+```
+$ go version
+go version go1.26.6 darwin/arm64        # /opt/homebrew/bin/go, shadowing the 1.19.2 tarball
+
+$ gofmt -l .
+(no output)
+
+$ go vet ./...
+(no output)
+
+$ go test ./... -count=1
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.545s
+?   	github.com/agusarias/tmux-todo/internal/scope	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/store	0.692s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.820s
+ok  	github.com/agusarias/tmux-todo/internal/tui	0.961s
+```
+
+`cmd/tdo` and `internal/scope` are the two packages without tests: `main` is three
+lines delegating to `internal/cli`, and `scope` is a `doc.go` stub owned by the
+scope-resolution task. Store tests use real SQLite files under `t.TempDir()` —
+no mocks — and cover fresh open, version round-trip, reopen persistence, nested
+directory creation and the empty-path error.
+
+### Build and linkage
+
+```
+$ CGO_ENABLED=0 make build
+go build -trimpath -ldflags '-s -w -X github.com/agusarias/tmux-todo/internal/cli.Version=2d57bb7' -o bin/tdo ./cmd/tdo
+
+$ ls -lh bin/tdo
+-rwxr-xr-x  1 agusarias  staff   7.1M bin/tdo
+
+$ file bin/tdo
+bin/tdo: Mach-O 64-bit executable arm64
+
+$ otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/libresolv.9.dylib (compatibility version 0.0.0, current version 0.0.0)
+```
+
+No libsqlite3 linkage. 7.1MB, below the 12-15MB the plan expected.
+
+### Binary behaviour
+
+```
+$ ./bin/tdo --version
+2d57bb7
+$ echo $?
+0
+
+$ ./bin/tdo doctor
+tdo      2d57bb7
+runtime  go1.26.6 darwin/arm64
+database /…/scratchpad/xdg/tmux-todo/tasks.db
+schema   0
+ok
+$ echo $?
+0
+```
+
+`doctor` opens a real SQLite database from the *shipped* binary — this is what
+makes the CGO_ENABLED=0 claim testable outside the test binary, since without it
+`otool -L` would only prove that a binary which never touches SQLite fails to
+link it.
+
+### Cold start (DoD 10)
+
+10 runs each, measured with `time.perf_counter()` around `subprocess.run` (more
+precise than `/usr/bin/time -p`, which quantises to 10ms):
+
+```
+tdo --version: n=10 median=7.4ms min=6.9ms max=8.3ms
+tdo doctor:    n=10 median=7.7ms min=7.4ms max=12.3ms
+```
+
+Median 7.4ms against a 100ms budget — 13x headroom, and `doctor` shows that
+opening SQLite costs ~0.3ms on top.
+
+### TUI (DoD 6) — scripted, not human-eyeballed
+
+Run in a real tmux 3.7b session, not a headless harness:
+
+```
+$ tmux new-session -d -s tdo-check -x 80 -y 24 "$PWD/bin/tdo tui"
+$ tmux capture-pane -p -t tdo-check
+╭───────────────────────────────────────╮
+│  tdo                                  │
+│                                       │
+│  scaffold placeholder — no tasks yet  │
+│                                       │
+│  version 2d57bb7 · q quit             │
+╰───────────────────────────────────────╯
+$ tmux send-keys -t tdo-check q          # session exited on q
+```
+
+**Not verified:** the `display-popup -E` overlay itself. `display-popup` needs an
+attached client and renders client-side, so `capture-pane` cannot see it — a
+detached-session attempt showed only the typed command. The Bubble Tea stack,
+render and quit path are proven above; the popup *framing* (60%×60%, centering,
+Esc handling inside the overlay) still wants one human look before the popup-TUI
+task builds on it. Flagging rather than claiming it.
+
+`internal/tui` also has headless tests asserting `q`/`Esc`/`ctrl+c` return
+`tea.Quit` and that unhandled keys do not.
+
+### Definition of done
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Go ≥ 1.23 from `/opt/homebrew/bin/go` | met — 1.26.6 |
+| 2 | `go.mod` module path + modern directive | met — `go 1.26` |
+| 3 | Package layout | met — all six directories |
+| 4 | `CGO_ENABLED=0 make build`, no libsqlite3 | met |
+| 5 | `--version` prints, exit 0 | met |
+| 6 | `tdo tui` placeholder quits on `q` | met in a tmux pane; popup overlay unverified (above) |
+| 7 | Store opens real SQLite, `schema_version` round-trip | met — tests + `doctor` |
+| 8 | `go test ./...` green, real test per non-placeholder package | met |
+| 9 | `go vet` clean, `gofmt -l` empty | met |
+| 10 | Cold start recorded, < 100ms | met — 7.4ms median |
+| 11 | `CLAUDE.md` under 60 lines | met — 58 lines |
+| 12 | `.gitignore` covers `bin/`, README stub | met |
