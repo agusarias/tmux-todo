@@ -1,0 +1,10 @@
+# Build output
+bin/
+
+# Local databases and scratch files
+*.db
+*.db-shm
+*.db-wal
+
+# Editor / OS noise
+.DS_Store
