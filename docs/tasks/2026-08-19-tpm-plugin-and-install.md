@@ -659,7 +659,10 @@ tmux restart takes:
 13. ✅ `make test`, `make test-plugin`, `make lint` clean; `gofmt -l .` empty;
     `CGO_ENABLED=0 make build` links only `libSystem` and `libresolv`.
 
-**Merged into local `main` as @@MERGE@@** (implementation commit `41646a6`, docs and
-evidence in `@@DOCS@@`). The worktree `../todo-tpm-plugin-and-install` has been removed, so
-read the diff with `git show 41646a6` or `git log -1 -p @@MERGE@@`. **Not pushed.**
+**Merged into local `main` as e41a85e** (implementation commit `41646a6`, docs and
+evidence in `2f980d6`). The worktree `../todo-tpm-plugin-and-install` has been removed, so
+read the diff with `git show 41646a6` or `git log -1 -p e41a85e`. **Not pushed.**
+`make test`, `make test-plugin` (45/45), `make lint` and `CGO_ENABLED=0 make build` were all
+re-run on `main` after the merge and are green there too; `git ls-files -s` on `main` confirms
+both shell files at mode **100755**.
 
