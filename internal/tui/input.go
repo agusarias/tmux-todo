@@ -19,6 +19,11 @@ const emptyEditHint = "text cannot be empty — esc to cancel"
 
 // startAdd opens the input row above the list, on the sticky default scope.
 func (m Model) startAdd() (tea.Model, tea.Cmd) {
+	if m.view == viewAll {
+		// The all-tasks view has an unambiguous answer already: the group the
+		// cursor is in. See startAddInGroup.
+		return m.startAddInGroup()
+	}
 	cycle := m.scopeCycle()
 	if len(cycle) == 0 {
 		// No scope to file a task under: adding could only fail.
@@ -28,6 +33,7 @@ func (m Model) startAdd() (tea.Model, tea.Cmd) {
 	m.inputKind = inputAdd
 	m.inputTarget = 0
 	m.inputScope = m.seedScope(cycle)
+	m.inputPlace = task.Scope{}
 	m.inputHint = ""
 	m.input.reset()
 	m.refreshViewport()
@@ -36,14 +42,15 @@ func (m Model) startAdd() (tea.Model, tea.Cmd) {
 
 // startEdit replaces the cursor row with the input row, pre-filled.
 func (m Model) startEdit() (tea.Model, tea.Cmd) {
-	if m.cursor < 0 || m.cursor >= len(m.tasks) {
+	target, ok := m.selectedTask()
+	if !ok {
 		return m, nil
 	}
-	target := m.tasks[m.cursor]
 	m.mode = modeInput
 	m.inputKind = inputEdit
 	m.inputTarget = target.ID
 	m.inputScope = target.Scope.Kind
+	m.inputPlace = task.Scope{}
 	m.inputHint = ""
 	m.input.setValue(target.Text)
 	m.refreshViewport()
@@ -80,8 +87,9 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "tab":
 		// Inert while editing: `e` is purely textual and scope changes go
-		// through `s`, so one key never does two jobs.
-		if m.inputKind == inputAdd {
+		// through `s`, so one key never does two jobs. Inert in the all-tasks
+		// view too, where the group header already answered the scope question.
+		if m.inputKind == inputAdd && m.inputPlace == (task.Scope{}) {
 			m.inputScope = m.nextScope(m.inputScope)
 			m.inputHint = ""
 			m.refreshViewport()
@@ -126,16 +134,31 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	}
-	scope, ok := m.scopeFor(m.inputScope)
+	scope, remember, ok := m.addTarget()
 	if !ok {
 		m.closeInput()
 		m.refreshViewport()
 		return m, nil
 	}
-	kind := m.inputScope
 	m.closeInput()
 	m.refreshViewport()
-	return m, m.addCmd(text, scope, kind)
+	return m, m.addCmd(text, scope, remember)
+}
+
+// addTarget is where a submitted add goes, and whether it should move the
+// sticky default.
+//
+// The two travel together because they are the same decision seen twice: an add
+// the *user* aimed with Tab is a statement about where the next one should go,
+// while an add aimed by the all-tasks view's group header is a placement inside
+// a list — it says nothing about the next add, and letting it redirect one would
+// be action at a distance from a keypress that never mentioned preferences.
+func (m Model) addTarget() (scope task.Scope, remember bool, ok bool) {
+	if m.inputPlace != (task.Scope{}) {
+		return m.inputPlace, false, true
+	}
+	scope, ok = m.scopeFor(m.inputScope)
+	return scope, ok, ok
 }
 
 // addCmd inserts the task, remembers its scope as the sticky default, and
@@ -145,15 +168,15 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 // dropped: the task is already saved by then, so failing the add over a
 // preference file would trade the user's data for their convenience. internal/scope
 // treats a corrupt sticky file the same way — silently, falling back.
-func (m Model) addCmd(text string, scope task.Scope, kind task.ScopeKind) tea.Cmd {
+func (m Model) addCmd(text string, scope task.Scope, remember bool) tea.Cmd {
 	setSticky := m.cfg.SetSticky
 	return m.query(0, func(ctx context.Context, db *store.DB) (int64, error) {
 		added, err := db.Add(ctx, text, scope)
 		if err != nil {
 			return 0, err
 		}
-		if setSticky != nil {
-			_ = setSticky(kind)
+		if setSticky != nil && remember {
+			_ = setSticky(scope.Kind)
 		}
 		return added.ID, nil
 	})
@@ -165,10 +188,10 @@ func (m Model) addCmd(text string, scope task.Scope, kind task.ScopeKind) tea.Cm
 // correction to that task, not a statement about the next one. Tidying one old
 // row should not silently redirect the next add.
 func (m Model) rescopeSelected() (tea.Model, tea.Cmd) {
-	if m.cursor < 0 || m.cursor >= len(m.tasks) {
+	target, ok := m.selectedTask()
+	if !ok {
 		return m, nil
 	}
-	target := m.tasks[m.cursor]
 	next := m.nextScope(target.Scope.Kind)
 	if next == target.Scope.Kind {
 		return m, nil
@@ -188,6 +211,7 @@ func (m Model) rescopeSelected() (tea.Model, tea.Cmd) {
 func (m *Model) closeInput() {
 	m.mode = modeNormal
 	m.inputKind = inputAdd
+	m.inputPlace = task.Scope{}
 	m.inputTarget = 0
 	m.inputHint = ""
 	m.input.reset()
@@ -249,10 +273,19 @@ func containsKind(kinds []task.ScopeKind, want task.ScopeKind) bool {
 // for an add, in place of the edited row for an edit.
 func (m Model) inputRowIndex() int {
 	if m.inputKind == inputEdit {
-		for i, t := range m.tasks {
-			if t.ID == m.inputTarget {
+		for i, r := range m.rows {
+			if r.kind == rowTask && r.task.ID == m.inputTarget {
 				return i
 			}
+		}
+		return 0
+	}
+	// An add in the all-tasks view files into the group under the cursor, so
+	// the row it opens belongs directly under that group's header rather than
+	// at the top of a list where it would appear to be in the first group.
+	if m.view == viewAll {
+		if i, ok := m.cursorHeader(); ok {
+			return i + 1
 		}
 	}
 	return 0

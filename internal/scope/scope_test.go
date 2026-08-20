@@ -559,3 +559,91 @@ func BenchmarkDirKey(b *testing.B) {
 		}
 	}
 }
+
+// TestLiveSessionsParsesOneNamePerLine — the format is one name per line, not a
+// separated list, because a session name can contain spaces. Anything that
+// splits on whitespace is wrong here, and the wrongness is invisible until
+// somebody names a session "my project".
+func TestLiveSessionsParsesOneNamePerLine(t *testing.T) {
+	var argv [][]string
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,0",
+		Run: func(name string, args ...string) ([]byte, error) {
+			argv = append(argv, append([]string{name}, args...))
+			return []byte("pulsar\nmy project\napi\n"), nil
+		},
+	}
+
+	live := r.LiveSessions()
+	for _, want := range []string{"pulsar", "my project", "api"} {
+		if !live[want] {
+			t.Errorf("LiveSessions is missing %q: %v", want, live)
+		}
+	}
+	if len(live) != 3 {
+		t.Errorf("LiveSessions = %v, want exactly the three names", live)
+	}
+
+	if len(argv) != 1 {
+		t.Fatalf("LiveSessions ran %d commands, want 1: %v", len(argv), argv)
+	}
+	want := []string{"tmux", "list-sessions", "-F", "#{session_name}"}
+	if !slicesEqual(argv[0], want) {
+		t.Errorf("call = %v, want %v", argv[0], want)
+	}
+}
+
+// TestLiveSessionsWithNoServerIsEmptyNotAnError — tmux absent, or no server
+// running, means nothing is live. That is an answer, not a failure: the popup
+// must still open, with every session group labelled "(not running)".
+func TestLiveSessionsWithNoServerIsEmptyNotAnError(t *testing.T) {
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,0",
+		Run: func(string, ...string) ([]byte, error) {
+			return nil, errors.New("no server running on /private/tmp/tmux-501/default")
+		},
+	}
+	if live := r.LiveSessions(); len(live) != 0 {
+		t.Errorf("LiveSessions = %v with no server, want empty", live)
+	}
+}
+
+// TestLiveSessionsDoesNotShortCircuitOutsideTmux — deliberately unlike
+// queryTmux. `tdo tui` can run from a plain shell with a server up, and those
+// sessions are still there to jump to; skipping the query outside tmux would make
+// the outside-tmux jump impossible to label.
+func TestLiveSessionsDoesNotShortCircuitOutsideTmux(t *testing.T) {
+	var asked bool
+	r := Resolver{
+		TmuxEnv: "", // not inside tmux
+		Run: func(string, ...string) ([]byte, error) {
+			asked = true
+			return []byte("pulsar\n"), nil
+		},
+	}
+	if live := r.LiveSessions(); !live["pulsar"] {
+		t.Errorf("LiveSessions = %v outside tmux, want the running session", live)
+	}
+	if !asked {
+		t.Error("LiveSessions short circuited outside tmux; the outside-tmux jump needs the answer")
+	}
+}
+
+// TestLiveSessionsAgainstARealServer is the production-path leg: an injected Run
+// proves the parsing, not the wiring, and this repo has shipped that gap twice.
+// It asserts against the tmux binary's own answer rather than against a fixture.
+func TestLiveSessionsAgainstARealServer(t *testing.T) {
+	if !tmuxAlive() {
+		t.Skip("needs a reachable tmux server")
+	}
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		t.Skipf("tmux list-sessions: %v", err)
+	}
+	live := NewResolver().LiveSessions()
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if name != "" && !live[name] {
+			t.Errorf("tmux reports session %q running but LiveSessions does not: %v", name, live)
+		}
+	}
+}

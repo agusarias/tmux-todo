@@ -121,8 +121,22 @@ func runTUI(args []string, stderr io.Writer) int {
 		Version:      Version,
 		DefaultScope: e.resolver.StickyDefault(e.scopes),
 		SetSticky:    e.resolver.SetStickyDefault,
+		// Resolved once, here, for the same reason as everything else in this
+		// struct: internal/tui must not ask tmux anything, least of all from
+		// inside a keypress. This is a second subprocess on popup open (~5ms
+		// alongside Resolve's display-message), which is the price of the
+		// all-tasks view's liveness label being right when the popup opens.
+		LiveSessions: e.resolver.LiveSessions(),
 	}
-	if err := tui.Run(cfg); err != nil {
+	jump, err := tui.Run(cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	// After Run, never alongside it: the popup's queued deletes commit inside
+	// its own event loop, so by the time we are here there is nothing a jump can
+	// discard. See jump.go for the invocation table.
+	if err := performJump(jump, e.resolver.TmuxEnv != "", nil); err != nil {
 		fmt.Fprintf(stderr, "tdo: %v\n", err)
 		return 1
 	}

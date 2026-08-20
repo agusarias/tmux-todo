@@ -93,6 +93,18 @@ type Config struct {
 	// Nil is fine and means "do not remember". An error from it never fails the
 	// add — the task is already saved by then.
 	SetSticky func(task.ScopeKind) error
+	// LiveSessions is the set of tmux session names running right now, resolved
+	// once by internal/cli before the popup opens. It is what labels an
+	// all-tasks group `(live)` or `(not running)`, and this package must never
+	// discover it: asking tmux from here would put a subprocess on a keypress
+	// inside the popup and make rendering depend on a call that can fail.
+	//
+	// Nil is fine and means "nothing is known to be running", which labels every
+	// session group `(not running)`. The staleness is deliberate and cheap: a
+	// session killed while the popup is open still reads `(live)`, and Enter then
+	// falls through to the create-and-switch path anyway, so a wrong label costs
+	// nothing.
+	LiveSessions map[string]bool
 	// Now is the clock the visibility cutoff is measured against. Injected, and
 	// defaulting to time.Now, for the same reason the store's DB.now is: a test
 	// can advance it 25h and prove a completed row leaves the view, which is not
@@ -136,12 +148,13 @@ const (
 	inputEdit
 )
 
-// viewKind selects which list is on screen. Only the merged view exists today;
-// the all-tasks view (`g`) becomes another case here rather than a restructure.
+// viewKind selects which list is on screen: the merged list over the active
+// scopes, or the wide list over every scope in the database.
 type viewKind int
 
 const (
 	viewMerged viewKind = iota
+	viewAll
 )
 
 // Model is the popup's root model.
@@ -159,30 +172,55 @@ type Model struct {
 	// and start out hidden.
 	openedAt time.Time
 
-	tasks    []task.Task
-	cursor   int
-	vp       viewport.Model
-	ready    bool // a query has come back at least once
-	err      error
-	quitting bool
+	// tasks are the rows on screen, flat and in screen order — the merged
+	// list's order, or the all-tasks view's groups concatenated. groups is the
+	// all-tasks view's shape of the same data.
+	tasks  []task.Task
+	groups []store.Group
+	// rows is what the cursor indexes: tasks and, in the all-tasks view, the
+	// group headers between them. See rows.go.
+	rows   []listRow
+	cursor int
+	// savedCursor remembers where the cursor was in the view that is not on
+	// screen, so `g` and `g` again come back to where you were. Indexed by
+	// viewKind; the entry for the current view is stale by design.
+	savedCursor [2]int
+	vp          viewport.Model
+	ready       bool // a query has come back at least once
+	err         error
+	quitting    bool
 
 	// The input row. inputScope is the Tab-selected scope and matters only for
 	// an add; inputTarget is the task under edit and matters only for an edit.
-	input       field
-	inputKind   inputKind
-	inputScope  task.ScopeKind
+	input      field
+	inputKind  inputKind
+	inputScope task.ScopeKind
+	// inputPlace is the *whole* scope an add files into when the all-tasks view
+	// picked it from a group header — kind and key. It exists because that key
+	// may not be in Config.Scopes at all (a session that is not running), so
+	// scopeFor could not find it. The zero value means "look the kind up in the
+	// active set", which is the merged view's add.
+	inputPlace  task.Scope
 	inputTarget int64
 	inputHint   string
 
-	// queued holds the ids of rows `d` has removed from the view but not from
-	// the database. It is both the LIFO undo stack and the filter set, and that
-	// is the whole mechanism: because nothing was written, `u` restores the row
-	// at its original position with its original id for free — the store still
-	// has it. See delete.go.
-	queued []int64
+	// queued is the LIFO undo stack of rows removed from the view but not from
+	// the database, and also the filter set that hides them. Because nothing was
+	// written, `u` restores a row at its original position with its original id
+	// for free — the store still has it. See delete.go.
+	//
+	// One entry per *keypress*, not per row: `d` pushes one id and `D` pushes a
+	// whole group's, so one `u` undoes exactly one action either way. Flattening
+	// this into a single []int64 is what made group delete need three undos.
+	queued [][]int64
 	// commitErr is what the queued deletes did on the way out. Update stores it
 	// and Run returns it: a delete that failed must not be reported as done.
 	commitErr error
+	// jump is the session Enter asked for, as an *intent*: this package runs no
+	// subprocess and imports no os/exec. Run hands it to internal/cli, which
+	// owns the tmux and sesh invocations — and which runs them only after the
+	// queued deletes have committed, because Enter closes the popup.
+	jump Jump
 
 	width  int
 	height int
@@ -191,7 +229,13 @@ type Model struct {
 // rowsMsg carries the result of a store query back into Update.
 type rowsMsg struct {
 	tasks []task.Task
-	err   error
+	// groups is filled instead of tasks when the query was the all-tasks
+	// view's. Both are carried on one message because a view switch is a
+	// re-query, and two message types would mean two handlers with the same
+	// anchor, clamp and viewport logic.
+	groups []store.Group
+	view   viewKind
+	err    error
 	// anchor is the task id the cursor should land on once the rows are in.
 	// Zero means "keep the current index". Re-anchoring by *id* rather than by
 	// index is what makes space usable twice in a row: a toggle can change how
@@ -277,9 +321,19 @@ func (m Model) writeThenReload(anchor int64, write func(context.Context, *store.
 // it should put the cursor on by performing the insert.
 func (m Model) query(anchor int64, write func(context.Context, *store.DB) (int64, error)) tea.Cmd {
 	db := m.cfg.DB
+	view := m.view
 	scopes := m.activeScopes()
-	filter := store.Filter{Scopes: scopes, IncludeDone: true, DoneSince: m.doneSince()}
+	// The all-tasks view leaves Scopes nil *deliberately*, which is the one
+	// place in this package that wants store.Filter's "every scope in the
+	// database" reading — including keys no longer active, which is the whole
+	// point of the view. It shares DoneSince with the merged view so the two
+	// cannot disagree about which completed rows are still visible.
+	filter := store.Filter{IncludeDone: true, DoneSince: m.doneSince()}
+	if view != viewAll {
+		filter.Scopes = scopes
+	}
 	current := m.tasks
+	currentGroups := m.groups
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
@@ -290,20 +344,27 @@ func (m Model) query(anchor int64, write func(context.Context, *store.DB) (int64
 			if err != nil {
 				// Keep the rows on screen: a failed write changed nothing, and
 				// blanking the list would read as "your tasks are gone".
-				return rowsMsg{tasks: current, err: err, anchor: anchor}
+				return rowsMsg{tasks: current, groups: currentGroups, view: view, err: err, anchor: anchor}
 			}
 			anchor = chosen
+		}
+		if db == nil {
+			return rowsMsg{view: view, anchor: anchor}
+		}
+		if view == viewAll {
+			groups, err := db.ListGrouped(ctx, filter)
+			return rowsMsg{groups: groups, view: view, err: err, anchor: anchor}
 		}
 
 		// An empty store.Filter.Scopes means *every scope in the database*, not
 		// "the active set" (see store.Filter). So an empty active set must short
 		// circuit: querying with it would show tasks from scopes the user is not
 		// in — other sessions, other repos.
-		if db == nil || len(scopes) == 0 {
-			return rowsMsg{anchor: anchor}
+		if len(scopes) == 0 {
+			return rowsMsg{view: view, anchor: anchor}
 		}
 		tasks, err := db.List(ctx, filter)
-		return rowsMsg{tasks: tasks, err: err, anchor: anchor}
+		return rowsMsg{tasks: tasks, view: view, err: err, anchor: anchor}
 	}
 }
 
@@ -311,12 +372,24 @@ func (m Model) query(anchor int64, write func(context.Context, *store.DB) (int64
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case rowsMsg:
+		if msg.view != m.view {
+			// A reload issued before a `g` and landing after it. Applying it
+			// would fill one view's rows while the other is on screen.
+			return m, nil
+		}
 		// The queue filter lives here, at the one point every reload passes
 		// through, so "a queued row is unreachable on *every* reload" is
 		// structural rather than something each caller has to remember.
-		m.tasks = m.dropQueued(msg.tasks)
+		if m.view == viewAll {
+			m.groups = m.visibleGroups(msg.groups)
+			m.tasks = groupTasks(m.groups)
+		} else {
+			m.tasks = m.dropQueued(msg.tasks)
+			m.groups = nil
+		}
 		m.err = msg.err
 		m.ready = true
+		m.rebuildRows()
 		if msg.anchor != 0 {
 			m.anchorCursor(msg.anchor)
 		}
@@ -377,8 +450,20 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		return m.rescopeSelected()
 
+	case "g":
+		return m.toggleAllTasks()
+
+	case "enter":
+		return m.jumpToSelected()
+
+	case "r":
+		return m.rehomeGroup()
+
 	case "d":
 		return m.queueDelete()
+
+	case "D":
+		return m.queueGroupDelete()
 
 	case "u":
 		return m.undoDelete()
@@ -449,10 +534,10 @@ func (m Model) hasTask(id int64) bool {
 // product has — docs/design.md defers an undo stack — so a mis-press has to be
 // fixable by pressing the same key again.
 func (m Model) toggleDone() (tea.Model, tea.Cmd) {
-	if m.cursor < 0 || m.cursor >= len(m.tasks) || m.cfg.DB == nil {
+	target, ok := m.selectedTask()
+	if !ok || m.cfg.DB == nil {
 		return m, nil
 	}
-	target := m.tasks[m.cursor]
 
 	return m, m.writeThenReload(target.ID, func(ctx context.Context, db *store.DB) error {
 		if target.Done {
@@ -467,8 +552,8 @@ func (m Model) toggleDone() (tea.Model, tea.Cmd) {
 // already outside the visibility window removes it — so this clamps rather than
 // insisting.
 func (m *Model) anchorCursor(id int64) {
-	for i, t := range m.tasks {
-		if t.ID == id {
+	for i, r := range m.rows {
+		if r.kind == rowTask && r.task.ID == id {
 			m.cursor = i
 			return
 		}
@@ -495,22 +580,36 @@ func (m Model) toggleFilter(kind task.ScopeKind) (tea.Model, tea.Cmd) {
 // moveCursor steps the selection, clamped at both ends, and scrolls the
 // viewport just enough to keep it visible.
 func (m *Model) moveCursor(delta int) {
-	if len(m.tasks) == 0 {
+	if len(m.rows) == 0 {
 		m.cursor = 0
 		return
 	}
-	m.cursor += delta
+	// Stepped one *selectable* row at a time rather than by index, so a group
+	// header is skipped rather than landed on and then snapped away from —
+	// which would make one j at the end of a group move two rows.
+	step, n := 1, delta
+	if delta < 0 {
+		step, n = -1, -delta
+	}
+	for range n {
+		next := m.nextSelectable(m.cursor, step)
+		if next < 0 {
+			break
+		}
+		m.cursor = next
+	}
 	m.clampCursor()
 	m.refreshViewport()
 }
 
 func (m *Model) clampCursor() {
-	if m.cursor >= len(m.tasks) {
-		m.cursor = len(m.tasks) - 1
+	if m.cursor >= len(m.rows) {
+		m.cursor = len(m.rows) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+	m.snapCursor()
 }
 
 // contentWidth is how many columns anything inside the box gets, once its
@@ -540,11 +639,7 @@ func (m Model) listHeight() int {
 // refreshViewport re-renders the rows into the viewport and scrolls the cursor
 // into view.
 func (m *Model) refreshViewport() {
-	rows := renderRows(m.tasks, renderOpts{
-		Width:  m.vp.Width,
-		Home:   m.cfg.Home,
-		Cursor: m.cursorRow(),
-	})
+	rows := m.renderRowLines()
 	// The input row goes *inside* the viewport rather than becoming a sixth
 	// chrome line: chromeHeight is a constant, three frame bugs have already
 	// shipped in that arithmetic, and a row the list scrolls is the cheaper
@@ -560,6 +655,24 @@ func (m *Model) refreshViewport() {
 	case focus >= m.vp.YOffset+h:
 		m.vp.SetYOffset(focus - h + 1)
 	}
+}
+
+// renderRowLines formats the list for whichever view is on screen.
+//
+// The two views are genuinely different layouts — the merged list shares one
+// column budget between task text and tier labels, the all-tasks list gives
+// rows the full width because the header carries the scope — so they stay two
+// pure functions over the same row slice rather than one function with a flag.
+func (m Model) renderRowLines() []string {
+	opts := renderOpts{
+		Width:  m.vp.Width,
+		Home:   m.cfg.Home,
+		Cursor: m.cursorRow(),
+	}
+	if m.view == viewAll {
+		return renderGroupRows(m.rows, opts)
+	}
+	return renderRows(m.tasks, opts)
 }
 
 // cursorRow is which task row carries the cursor mark. While adding, the input
@@ -676,7 +789,7 @@ func (m Model) body() string {
 // is truncated like every other line View assembles: lipgloss wraps rather than
 // clips, and a wrapped help line would push the frame past the pane.
 func (m Model) helpBody() []string {
-	lines := helpLines(m.cfg.Version)
+	lines := helpLines(m.view, m.cfg.Version)
 	if h := m.listHeight(); len(lines) > h {
 		lines = lines[:h]
 	}
@@ -694,8 +807,8 @@ func (m Model) emptyText() string {
 	// A list emptied by `d` is not an empty list: the rows are still in the
 	// store and `u` brings them back. Saying "no tasks yet" here would be a lie
 	// that also hides the way out.
-	if len(m.queued) > 0 {
-		return fmt.Sprintf("%s queued for deletion — u undoes", plural(len(m.queued), "task"))
+	if ids := m.queuedIDs(); len(ids) > 0 {
+		return fmt.Sprintf("%s queued for deletion — u undoes", plural(len(ids), "task"))
 	}
 	if m.filter != "" {
 		return fmt.Sprintf("no %s tasks — press %s again for all scopes", m.filter, filterKey(m.filter))
@@ -741,26 +854,30 @@ func (m Model) footer() string {
 	return hintStyle.Render(truncate(footerText, m.contentWidth()))
 }
 
-// Run starts the popup and blocks until it exits.
+// Run starts the popup and blocks until it exits, returning the jump the user
+// asked for (the zero Jump means none) and the outcome of the queued deletes.
 //
-// It returns the final model's commitErr, so a queued delete that failed on the
-// way out reaches internal/cli and the exit code. The popup has already gone by
+// The order matters and is structural: the deletes commit *inside* the program's
+// event loop, so by the time Run returns there is nothing left to lose and
+// internal/cli can run the jump. It returns the final model's commitErr, so a
+// queued delete that failed on the way out reaches internal/cli and the exit
+// code. The popup has already gone by
 // then, and reporting "deleted" for a row still in the database would be worse
 // than the delete not happening.
-func Run(cfg Config) error { return run(New(cfg)) }
+func Run(cfg Config) (Jump, error) { return run(New(cfg)) }
 
 // run is Run with the program options exposed, so a test can drive the real
 // event loop with a scripted input and no terminal. Without this seam the only
 // thing asserting that Run reports commitErr would be inspection — and "the
 // production entry point is not what the tests exercise" is a bug this repo has
 // shipped twice.
-func run(m Model, opts ...tea.ProgramOption) error {
+func run(m Model, opts ...tea.ProgramOption) (Jump, error) {
 	final, err := tea.NewProgram(m, opts...).Run()
 	if err != nil {
-		return fmt.Errorf("run tui: %w", err)
+		return Jump{}, fmt.Errorf("run tui: %w", err)
 	}
 	if final, ok := final.(Model); ok {
-		return final.commitErr
+		return final.jump, final.commitErr
 	}
-	return nil
+	return Jump{}, nil
 }
