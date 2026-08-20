@@ -1,7 +1,7 @@
 # Scope Resolution
 
 **Status:** review
-**Worktree:** /Users/agusarias/workspace/todo-scope-resolution
+**Worktree:** none (removed after merge)
 
 ## Goal
 Resolve the three independent scopes for the current context: `global`, `dir` (active
@@ -421,6 +421,9 @@ and it is three lines delegating to `internal/cli`.
 ---
 
 ## Evidence (fix-forward, 2026-08-20)
+
+**Merge commit:** `d69dd4d` on local `main` (unpushed) — `git show d69dd4d`,
+`git log -1 -p e8bc75f` for the fix commit itself.
 
 Second execution, addressing only the three items in **Fix-forward scope**. The original
 implementation commit `03d96c4` stays on `main` untouched; this is a follow-up on top.
