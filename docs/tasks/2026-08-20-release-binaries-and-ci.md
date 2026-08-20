@@ -1,6 +1,6 @@
 # Release Binaries And CI
 
-**Status:** agreed
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -28,6 +28,11 @@ Two further reasons this is worth its own task rather than a footnote:
   catch it on. CI is what makes that class of finding automatic.
 
 ## Constraints
+- **The executor must not push, tag, or create a release.** User's Checkpoint 1 ruling. Every
+  artifact is written and committed locally; the user pushes. DoD items 1-13 and 15-17 are
+  all achievable without a remote. **DoD 14 (`v0.1.0`) and every item needing a real CI run or
+  a real release asset move to `2026-08-20-prove-ci-and-cut-v0.1.0.md`** — do not claim them
+  here, and do not claim a green CI run that has not happened.
 - Must not require CGO. The whole point of `modernc.org/sqlite` is `CGO_ENABLED=0`, so
   cross-compilation is a plain `GOOS`/`GOARCH` matrix with no C toolchain per target.
 - CI must run the suite **without a tmux server** — that is the environment the
@@ -39,6 +44,15 @@ Two further reasons this is worth its own task rather than a footnote:
   work.
 
 ## Critical surface
+**Residual risk, accepted by the user at Checkpoint 1.** With best-effort verification, a
+download proceeds unverified when `checksums.txt` cannot be fetched — so an attacker able to
+serve a binary while suppressing the checksums file gets code execution on a tmux server
+start. Two things bound it: a positive mismatch still refuses (DoD 8), and the transport is
+HTTPS to GitHub, so this requires breaking TLS or compromising the release itself rather than
+merely being on the network. Signature verification (minisign/cosign) is the real fix and is
+deliberately *not* in this task — it needs key management and belongs in its own brief.
+Recorded here so the trade is visible rather than implicit.
+
 Publishing a release is **externally visible and effectively irreversible** — a tag people
 have fetched, and assets a plugin may already be downloading. Getting the platform matrix or
 the archive layout wrong is a breaking change for anyone who installed in between. The
@@ -80,10 +94,19 @@ macOS, the plugin harness on ubuntu, and a cross-compile matrix.
 **The plugin's download step**
 7. `tmux-todo.tmux`'s resolution chain becomes: `$PATH` → `$PLUGIN_DIR/bin/tdo` → **download**
    → `go build` → message-and-no-keybind. The first two steps are unchanged.
-8. **The download is verified before it is ever executed.** SHA-256 against `checksums.txt`,
-   and a mismatch is treated exactly like a failed download: fall through to the next chain
-   step, never run the file. **This is the item to get right** — everything else here is
-   convenience; this is the plugin fetching a binary off the network and running it.
+8. **Verification is best-effort, per the user's Checkpoint 1 ruling** — with one line the
+   ruling does not relax. Fetch `checksums.txt` and SHA-256 the download against it:
+   - **sum present and matching** → use the binary.
+   - **sum present and NOT matching** → refuse: delete the file, fall through to the source
+     build, never execute it. A positive mismatch is still fatal; "best-effort" relaxes what
+     happens when the checksums file is *unavailable*, not what happens when it says no.
+   - **`checksums.txt` unreachable, 404, or no `sha256sum`/`shasum` on the box** → proceed with
+     the download unverified, and say so once via the same `display-message` channel the
+     no-binary path uses, so an unverified install is visible rather than silent.
+
+   The curator's recommendation was to make a verified sum mandatory; the user chose
+   best-effort so an install is never blocked by a missing checksums file. Recorded as the
+   user's call. The residual risk is stated plainly in Critical surface.
 9. The download writes to a temp file and moves it into place only after verification, so an
    interrupted or corrupt download can never leave a broken `bin/tdo` that step 2 then trusts
    on the next tmux start.
@@ -114,19 +137,20 @@ macOS, the plugin harness on ubuntu, and a cross-compile matrix.
     make build` still static.
 
 ## Verification
-- The CI workflow **green on a real push**, with the run URL or output in Evidence. A workflow
-  that has never run is not evidence.
-- **The tmux-less assertion (DoD 2) proven to fire**: a deliberate run with tmux installed in
-  the go job, showing the job fail. Otherwise that guard is itself unverified — the exact
-  vacuity this project has now hit four times.
+- **Workflow syntax validated locally** — `actionlint` if available, otherwise a YAML parse
+  plus a line-by-line review against the schema. The executor cannot push (see Constraints),
+  so a green CI run is **not** available as evidence here and must not be claimed; it moves to
+  `2026-08-20-prove-ci-and-cut-v0.1.0.md`.
 - `make test-plugin` extended and green, with the new cases named: asset present and verified,
   asset 404, **checksum mismatch**, offline, no downloader, and each `uname` mapping.
 - **A mutation proof for DoD 8**: with the checksum check removed, the mismatch case must fail.
   A verification step that is never exercised against a bad file is not a verification step.
-- The release workflow proven on a throwaway pre-release tag before `v0.1.0` is cut, with the
-  four assets and `checksums.txt` listed, and one asset downloaded and run.
-- A real end-to-end install: a TPM-style clone with no `bin/tdo` and **no `go` on `PATH`**,
-  reaching a working `prefix + t` purely by download. That is the user this task is for.
+- The four cross-compiles run locally with the release workflow's exact flags, and one
+  binary's `tdo --version` shown to carry the injected version string — so the ldflags path is
+  proven even though no release exists yet.
+- A local end-to-end install with **no `go` on `PATH`**, against a **`file://` or local-HTTP
+  fixture** standing in for the release asset, reaching a working `prefix + t` purely by
+  "download". The same leg against a real GitHub asset moves to the follow-up brief.
 
 ## Decisions
 - **2026-08-20 (curator, split from `tpm-plugin-and-install`):** deferred out of that task
