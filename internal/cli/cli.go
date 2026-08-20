@@ -82,6 +82,23 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// runTUIProgram is the seam that starts the popup. It exists for exactly one
+// reason: a test must be able to cover runTUI's assembly without a Bubble Tea
+// program actually starting.
+//
+// The obvious assumption — that a `go test` process has no terminal, so tui.Run
+// fails harmlessly at the last step — is **false inside tmux**, which for a tmux
+// plugin is where every developer runs the suite. Bubble Tea opens /dev/tty
+// directly, so redirecting the test's stdout hides nothing from it: the popup
+// really renders, into the developer's pane, and then blocks forever on a
+// keystroke that never comes. `go test ./...` prints package results in
+// command-line order, so one hung package means `make test` never finishes.
+//
+// Same shape as newResolver, and for a related reason: a package that reaches
+// for the environment needs one substitutable point where it does so, or its
+// tests either lie about the environment or depend on it.
+var runTUIProgram = tui.Run
+
 // runTUI opens the popup. Everything environment-dependent is resolved here and
 // injected: internal/tui never asks tmux or the filesystem anything, which is
 // what keeps its Update/View testable headlessly.
@@ -128,7 +145,7 @@ func runTUI(args []string, stderr io.Writer) int {
 		// all-tasks view's liveness label being right when the popup opens.
 		LiveSessions: e.resolver.LiveSessions(),
 	}
-	jump, err := tui.Run(cfg)
+	jump, err := runTUIProgram(cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "tdo: %v\n", err)
 		return 1
