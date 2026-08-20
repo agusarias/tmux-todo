@@ -1,6 +1,6 @@
 # Go Project Scaffold
 
-**Status:** review
+**Status:** done
 **Worktree:** /Users/agusarias/workspace/todo-go-project-scaffold
 
 ## Goal
@@ -268,3 +268,23 @@ task builds on it. Flagging rather than claiming it.
 | 10 | Cold start recorded, < 100ms | met — 7.4ms median |
 | 11 | `CLAUDE.md` under 60 lines | met — 58 lines |
 | 12 | `.gitignore` covers `bin/`, README stub | met |
+
+## Close-out
+Approved at Checkpoint 2 on 2026-08-19. All 12 Definition-of-done items verified
+independently by the curator (re-ran vet, gofmt, tests, `CGO_ENABLED=0 make build`,
+`otool -L`, `--version`, `doctor`) — not taken from the executor's report alone.
+
+Merged as `abbc3e3` (fast-forward onto local `main`, unpushed). Worktree removed.
+
+**Known gap, deliberately accepted:** the `display-popup` overlay framing (60%x60%,
+centering, `Esc` handling inside the overlay) is unverified — `display-popup` needs an
+attached client and renders client-side, so no headless check can see it. The Bubble Tea
+stack itself is proven in a plain tmux pane. Inherited by the popup-TUI task, which has to
+render in that overlay regardless.
+
+**Carried to sqlite-store-and-migrations:** `ensureSchemaVersion` has a benign
+check-then-insert race (two fresh opens can both insert a row; self-heals because
+`Version()` reads `LIMIT 1` and `SetVersion` updates all rows). Fix with a single-row
+constraint. WAL mode and `busy_timeout` are also still absent. Both folded into that brief.
+
+**Remote:** none configured, by decision — stays local until v1 works.
