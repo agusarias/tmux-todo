@@ -206,6 +206,25 @@ cannot work, since tmux is POSIX-only and WSL users are `linux/amd64`.
   asserts they are genuinely unreachable; the download cases follow that pattern rather than
   inventing a second mechanism.
 
+### 2026-08-20 (executor) — three implementation choices, none touching the brief
+
+- **`$TDO_RELEASE_BASE_URL` is the test seam**, read once inside step 3 so the steady state
+  pays nothing for it. An env var rather than a tmux option: an option would be a documented
+  user-facing surface to support, and the harness runs the script directly with `env` anyway.
+  It doubles as the way to point an install at a mirror, so it is documented in the README as
+  that rather than as a test hook.
+- **The harness serves fixtures over a real local HTTP server** (`python3 -m http.server` on
+  127.0.0.1, kernel-assigned port), falling back to `file://` when python3 is absent. Started
+  as `file://` only, which turned out to cost two legs: a missing local file is not an HTTP
+  404, and **wget refuses `file://` outright**. The 404 leg is the one that shows `curl -f` is
+  load-bearing (see the mutation table), so it was worth a process per fixture.
+  Every case gets `$TDO_RELEASE_BASE_URL` pointed at a non-existent path by default, so no
+  case can reach github.com — otherwise `resolve-4-nothing` would start failing the day
+  `v0.1.0` ships.
+- **`chmod 0755`, not `chmod +x`.** `mktemp` creates the temp file `0600` and `+x` on that
+  yields `0711`, so the installed binary's mode would have depended on which step installed
+  it. Caught by reading the `ls -l` in the end-to-end capture, not by a test.
+
 **CURATOR'S CALL, not asked — flagged at Checkpoint 1.** DoD 8's checksum verification is
 non-negotiable and is written as a hard requirement rather than an option. Downloading a
 binary over the network and executing it is the single highest-risk thing in this project, and
@@ -265,4 +284,264 @@ until CI is green. So:
   of Checkpoint 1 rather than a side effect of the first workflow file.
 
 ## Evidence
-(Added by the executor.)
+
+Everything below ran on this machine (darwin/arm64, tmux 3.7b, go1.26.6, bash 3.2.57).
+**Nothing was pushed, tagged or released**, per the Constraints. Where a DoD item can only
+be closed by a real CI run or a real release asset, that is said plainly rather than
+implied — those legs belong to `2026-08-20-prove-ci-and-cut-v0.1.0.md`.
+
+### Workflow validation
+
+`actionlint` is not installed on this machine, so it was built into a scratch directory
+(`GOBIN=... go install github.com/rhysd/actionlint/cmd/actionlint@latest`, v1.7.12) rather
+than skipped:
+
+```
+$ actionlint .github/workflows/ci.yml .github/workflows/release.yml
+$ echo $?
+0
+```
+
+**And the check is not vacuous.** A copy with `matrix.os` misspelled and the `setup-go`
+ref dropped is rejected, so actionlint really is reading these files:
+
+```
+.github/workflows/ci.yml:31:18: property "oss" is not defined in object type {os: string} [expression]
+.github/workflows/ci.yml:35:15: specifying action "actions/setup-go" in invalid format because ref is missing [action]
+exit=1
+```
+
+`shellcheck` is absent, so actionlint skipped the `run:` bodies. Each was extracted and
+handed to `bash -n` instead — syntax only, but that is the failure a workflow cannot
+recover from:
+
+```
+ok   ci.yml       go         Assert the runner has no tmux
+ok   ci.yml       go         make lint
+ok   ci.yml       go         make test
+ok   ci.yml       plugin     Install tmux
+ok   ci.yml       plugin     make test-plugin
+ok   ci.yml       build      Build ${{ matrix.goos }}/${{ matrix.goarch }}
+ok   release.yml  release    Build the four targets
+ok   release.yml  release    Verify the linux/amd64 binary is static and works
+ok   release.yml  release    checksums.txt
+ok   release.yml  release    Publish the release
+run: bodies with bash syntax errors: 0
+```
+
+**DoD 2's assumption, checked rather than assumed.** The assertion fails the `go` job when
+`command -v tmux` succeeds, so it is only useful if the runner images ship without tmux —
+otherwise it turns CI red on arrival. Both readmes in `actions/runner-images` were read (Ubuntu 24.04 and macOS 15
+arm64, 2026-08-20): **neither lists tmux**; both list `curl` and `wget`. The workflow
+comment records this and says the remedy is to *mask* tmux, never to delete the assertion.
+
+### The release build, run locally with release.yml's exact flags
+
+`CGO_ENABLED=0 GOOS=… GOARCH=… go build -trimpath -ldflags "-s -w -X …/internal/cli.Version=v0.1.0-localproof"`:
+
+```
+tdo-darwin-arm64       7631 KB  Mach-O 64-bit executable arm64
+tdo-darwin-amd64       7816 KB  Mach-O 64-bit executable x86_64
+tdo-linux-amd64        7692 KB  ELF 64-bit LSB executable, x86-64, ..., statically linked
+tdo-linux-arm64        7488 KB  ELF 64-bit LSB executable, ARM aarch64, ..., statically linked
+```
+
+`file` reporting **"statically linked"** for the linux targets is what release.yml's static
+check greps for, so that grep is known to match a real build rather than a guess.
+
+`checksums.txt`, written by the same command release.yml uses, and verified:
+
+```
+$ sha256sum tdo-darwin-arm64 tdo-darwin-amd64 tdo-linux-amd64 tdo-linux-arm64 > checksums.txt
+$ sha256sum -c checksums.txt
+tdo-darwin-arm64: OK
+tdo-darwin-amd64: OK
+tdo-linux-amd64: OK
+tdo-linux-arm64: OK
+```
+
+**The ldflags path is proven even with no release in existence** — the version comes out the
+other end:
+
+```
+$ ./tdo-darwin-arm64 --version
+v0.1.0-localproof
+
+$ otool -L tdo-darwin-arm64          # CLAUDE.md's driver invariant
+  /usr/lib/libSystem.B.dylib
+  /usr/lib/libresolv.9.dylib
+libsqlite3 lines: 0
+
+$ ./tdo-darwin-arm64 doctor --db "$(mktemp -d)/tasks.db"
+tdo      v0.1.0-localproof
+runtime  go1.26.6 darwin/arm64
+schema   2 (latest 2)
+journal  wal
+tasks    0 pending, 0 total
+ok
+```
+
+That is DoD 6's pair of checks (static, and `doctor` on a throwaway database) run against
+the **native darwin/arm64 asset** on this machine. The *runner's* leg — the same two checks
+on `tdo-linux-amd64` on ubuntu — is written into release.yml and has not run.
+
+### The plugin harness
+
+`make test-plugin`, with the fixture release served over real local HTTP:
+
+```
+plugin script : .../tmux-todo.tmux
+tmux          : /opt/homebrew/bin/tmux (tmux 3.7b)
+bash          : /bin/bash (GNU bash, version 3.2.57(1)-release (arm64-apple-darwin24))
+go            : /opt/homebrew/bin/go (usable for the build case: yes)
+host asset    : tdo-darwin-arm64
+sha256 tool   : sha256sum
+downloader    : curl=/usr/bin/curl wget=none
+fixture server: /opt/homebrew/bin/python3
+...
+plugin harness: 118 passed, 0 failed
+```
+
+**55 before this task, 118 after** — the pre-change harness was run from
+`git show HEAD:test/plugin_install_test.sh` to get that baseline, so 63 assertions are new.
+
+The named cases from the Verification section, all green:
+
+| case | covers |
+|---|---|
+| `dl-1-verified` | asset present, sum matches, keybind installed, second run does not re-download |
+| `dl-2-checksum-mismatch` | **the sum disagrees** → deleted, nothing installed, no keybind |
+| `dl-3-asset-404` | a real HTTP 404 for this platform |
+| `dl-4-no-checksums-file` | `checksums.txt` absent → used unverified, `display-message` says so |
+| `dl-5-asset-absent-from-checksums` | `checksums.txt` present but no line for us → same |
+| `dl-6-offline` | downloader exits non-zero; canary proves it was invoked |
+| `dl-7-http-error` | curl exit 22 / wget exit 8 — the 403-or-rate-limit shape |
+| `dl-8-no-downloader` | neither `curl` nor `wget` on `$PATH` at all |
+| `dl-8b-no-downloader-control` | **the same sandbox with curl DOES download** — dl-8 is not vacuous |
+| `dl-10-uname-*` (6 rows) | `Darwin`/`Linux` × `arm64`/`aarch64`/`x86_64`/`amd64` → the right asset |
+| `dl-11-unmapped-*` (2 rows) | `FreeBSD/amd64`, `Linux/riscv64` → step skipped, falls through |
+| `dl-12`, `dl-13` | `$PATH` and an existing `bin/tdo` both beat the download |
+| `dl-14` | the download beats `go build` even with a usable go present |
+| `dl-15` | a *failed* download still leaves the source build its turn |
+| `steady-state-no-network` | booby-trapped curl+wget: **neither is ever invoked** |
+
+`dl-9-wget-only` **SKIPPED — there is no `wget` on this machine.** The wget branch of
+`fetch()` is therefore unexercised here; the case is written and will run on CI's ubuntu
+runner, whose image lists wget. Recorded as a real gap rather than a passing row.
+
+### Mutation proofs
+
+A green suite proves nothing about a guard that never sees bad input. Each mutation is one
+targeted edit to a copy of the script, run through the unmodified harness via
+`PLUGIN_SCRIPT=`:
+
+| mutation | result |
+|---|---|
+| **DoD 8:** delete `[ "$want" = "$got" ] \|\| return 1` | **114 passed, 4 failed** — all four in `dl-2`: the mismatching download is installed, a keybind and a hook point at it. `dl-1` still passes, so the edit hit the guard and nothing else. |
+| step 3 never called from `resolve_binary` | 90 passed, **28 failed** — every download case collapses; `dl-14` falls back to a build |
+| step 3 moved *ahead* of the `bin/tdo` check | 113 passed, **5 failed** — `dl-13` (the existing binary is overwritten) and `steady-state-no-network` (`curl was never invoked` fails: the canary exists) |
+| `curl -fsSL` → `curl -sSL` (no `-f`) | 116 passed, **2 failed** — `dl-3-asset-404`: the 404 **page** is installed as `bin/tdo` and a key is bound to it |
+
+The last one is why the fixture is served over HTTP rather than `file://`: only a real 404
+can demonstrate that `-f` is load-bearing.
+
+**DoD 9 is covered as far as a harness can reach, and not further.** `assert_no_temp_leftover`
+holds three cases to leaving no `.tdo.*` behind, and mutation 1 is what shows nothing reaches
+`bin/tdo` *before* verification — with the comparison gone, it does. Interrupting a download
+mid-flight is not something this harness can stage, so the atomicity of the same-filesystem
+`mv` rests on the code and its comment, not on a test.
+
+### Local end-to-end: no Go toolchain, downloaded binary, real `prefix + t`
+
+The one leg that ties it together. A sandbox `$PATH` with **no `go` and no `tdo`**, the real
+release binary served over local HTTP, and a nested client (`TMUX= tmux -L … attach`) so the
+popup can actually be opened and captured:
+
+```
+sandbox check (this is the 'no Go toolchain' claim):
+  go on PATH  : NONE
+  tdo on PATH : NONE
+  curl        : /usr/bin/curl
+
+== running the plugin (TPM's job) ==
+  tmux-todo: no tdo binary found; downloading tdo-darwin-arm64 from http://127.0.0.1:57799 (this happens once)
+
+downloaded binary:
+  -rwx--x--x  1 agusarias  staff  7814338 tdo
+  --version -> v0.1.0-localproof
+  sha256 matches the release asset: yes
+
+== pressing prefix + t in the nested client ==
+  |⌁        ┌──────────────────────────────────────────────────────────┐main ✔
+  |         │╭────────────────────────────────────────────────────────╮│
+  |         ││  tdo                                                   ││
+  |         ││                                                        ││
+  |         ││  ▸ ◉ downloaded, not built                   (global)  ││
+  |         ││                                                        ││
+  |         ││  j/k move · space done · ? keys · q quit               ││
+  |         │╰────────────────────────────────────────────────────────╯│
+  |         └──────────────────────────────────────────────────────────┘
+```
+
+The task in that popup was added through the downloaded binary. The `-rwx--x--x` in that
+capture is why the script now does `chmod 0755` rather than `chmod +x`: `mktemp` creates the
+file `0600` and `+x` turns that into `0711`, which is not the mode step 4's `go build`
+produces. Fixed after this capture; the harness is green either way.
+
+### Sweep (DoD 17)
+
+```
+$ make lint          # go vet ./... + gofmt -l . check
+go vet ./...
+exit=0
+
+$ gofmt -l .
+(empty)
+
+$ make test
+?   github.com/agusarias/tmux-todo/cmd/tdo  [no test files]
+ok  github.com/agusarias/tmux-todo/internal/cli      0.803s
+ok  github.com/agusarias/tmux-todo/internal/scope    0.801s
+ok  github.com/agusarias/tmux-todo/internal/store    0.474s
+ok  github.com/agusarias/tmux-todo/internal/task     0.903s
+ok  github.com/agusarias/tmux-todo/internal/tui      6.126s
+
+$ CGO_ENABLED=0 make build
+go build -trimpath -ldflags '-s -w -X …/internal/cli.Version=786d22a-dirty' -o bin/tdo ./cmd/tdo
+libsqlite3 lines in otool -L: 0
+bin/tdo --version: 786d22a-dirty
+```
+
+That last line is the brief's own claim confirmed from the other side: with no tags,
+`git describe` yields a bare commit hash, so **every build in this project's history has
+stamped a version like `786d22a-dirty`.** DoD 14 is what fixes it, and DoD 14 is not this
+task's to close.
+
+### Definition of done
+
+| # | | note |
+|---|---|---|
+| 1 | ✅ written | three jobs as specified; actionlint clean. **Not run** — no push. |
+| 2 | ✅ written | assertion present; both runner images confirmed tmux-free from their readmes. **Not run.** |
+| 3 | ✅ | `go-version-file: go.mod` in all three jobs and in release.yml |
+| 4 | ✅ | flags proven locally on all four targets; `--version` carries the injected string |
+| 5 | ✅ | `tdo-<goos>-<goarch>`, no archive, no version in the name; `checksums.txt` verified locally |
+| 6 | ⚠️ partial | both checks pass against the **native** asset here; the runner's linux/amd64 leg is written and unrun |
+| 7 | ✅ | five-step chain; `dl-12`/`dl-13`/`dl-14`/`dl-15` pin the ordering in both directions |
+| 8 | ✅ | all three outcomes cased; **mutation-proven** |
+| 9 | ✅ mostly | temp-in-destination + post-verification `mv`; see the DoD 9 note above for what a harness cannot show |
+| 10 | ⚠️ partial | curl leg proven; **wget leg unexercised — no wget on this machine** |
+| 11 | ✅ | offline, HTTP error, 404, mismatch, no downloader, unmapped platform — six cases, all falling through |
+| 12 | ✅ | 6 mapping rows + 2 unmapped rows |
+| 13 | ✅ | booby-trapped downloader; **mutation-proven** |
+| 14 | ⛔ **not claimed** | moves to `2026-08-20-prove-ci-and-cut-v0.1.0.md` per Constraints |
+| 15 | ✅ | README: the five-step chain, the three verification outcomes, and a manual release-asset install whose `shasum -c` one-liner was run (and shown to fail on a corrupted file) |
+| 16 | ✅ | `docs/design.md` Distribution: five-step chain, the asset contract, the verification asymmetry, CI, and why `v0.1.0` |
+| 17 | ✅ | see Sweep |
+
+**What a reviewer should read closely.** `tmux-todo.tmux` is the only file here that runs on
+a user's machine and executes something it fetched from the network: `download_binary`,
+`verify_download` and `fetch` deserve line-by-line reading. The two workflow files are
+untested-in-anger by construction and are the follow-up task's subject. `README.md`,
+`docs/design.md` and `CLAUDE.md` are prose. `test/plugin_install_test.sh` is the largest
+diff and the evidence above is what carries it.

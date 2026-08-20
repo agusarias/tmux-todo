@@ -41,6 +41,14 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   Resolves the binary, installs the keybind and the rename hook. tmux sources it on
   **every server start**, so the resolved path stays cheap. `test/plugin_install_test.sh`
   drives it against private `tmux -L` servers; `make test-plugin` runs that.
+- `.github/workflows/ci.yml` — three jobs: `go` on ubuntu **and** macOS (which *asserts*
+  the runner has no tmux), `plugin` on ubuntu (installs tmux, runs `make test-plugin`), and
+  a `build` matrix cross-compiling the four release targets. Go comes from
+  `go-version-file: go.mod`, never a literal.
+- `.github/workflows/release.yml` — a `v*` tag builds `tdo-<goos>-<goarch>` for
+  darwin/{arm64,amd64} and linux/{amd64,arm64}, verifies the native one, writes
+  `checksums.txt` and publishes with `gh`. **Asset names are a contract the plugin
+  computes** — renaming one breaks every installed plugin at its next server start.
 - `internal/cli` — stdlib `flag` with manual subcommand dispatch. Also owns the two
   tmux-facing side jobs: refreshing the `session_id -> name` map on every resolve
   (`openEnv`) and the `session-renamed` subcommand the tmux hook calls.
@@ -90,6 +98,23 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   it means a new module in the build graph. `internal/tui/field.go` is a ~150-line one-line
   editor instead. Check the *transitive* imports before assuming a subpackage of an existing
   dependency is a free upgrade.
+- **The plugin's five-step chain puts the download at step 3, and keeps `go build` at
+  step 4.** Ahead of it a user's own `tdo` still wins and an existing install is still
+  reused, so nothing that worked before stops working; behind it the source build is what
+  keeps a machine with no network or an unshipped platform working. Every step-3 failure
+  falls through — nothing in the install path may fail a tmux server start.
+- **Checksum verification is best-effort, and the three outcomes are deliberately
+  asymmetric.** Match → use it. **Mismatch → delete it and fall through, never execute
+  it.** No `checksums.txt` and no `sha256sum`/`shasum` → use it *unverified* with a
+  one-off `display-message`. "Best-effort" relaxes what happens when the checksums file is
+  *unavailable*, not what happens when it says no. The residual risk (an attacker who can
+  serve a binary while suppressing the checksums file) is accepted and written down in
+  `docs/design.md`; signatures are the real fix and are out of scope.
+- **`/releases/latest/download/<asset>`, never the GitHub API.** That URL redirects to the
+  current release, so the plugin needs no JSON, no `jq`, and is not subject to the
+  unauthenticated rate limit — which a script sourced on every tmux server start would be
+  an excellent way to hit. It is also why the version lives in the URL and not the asset
+  name.
 - **The session scope key is the session *name*, so renames need a map.** tmux gives a
   `session-renamed` hook only the *new* name; the old one — the key the tasks are filed
   under — is already gone. The `session_id` survives the rename, so v2's `sessions` table
@@ -270,6 +295,27 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   sandbox PATH and sandbox only the binaries under test — then assert the sandbox really
   lacks them, so the suite fails loudly instead of degrading if `tdo` or `go` shows up in
   `/usr/bin` later.
+- **`python3 -m http.server` needs `-u` when its output is redirected.** The
+  "Serving HTTP on 127.0.0.1 port NNNNN" line is buffered otherwise, so a harness that
+  reads the port out of the log never finds one. That does not fail: `serve_fixture` fell
+  back to `file://` and the download suite stayed green at 118/118 while silently losing
+  the two legs the server exists for — a real HTTP 404 (which is what makes `curl -f`
+  load-bearing) and wget, which rejects `file://` URLs outright.
+- **`curl` without `-f` saves the 404 page and exits 0.** For the plugin's download step
+  that means `bin/tdo` becomes an HTML document the keybind then points at. Proven by
+  mutation: drop the `-f` and `dl-3-asset-404` installs the error page and binds a key to
+  it. `wget` needs `-q` for the same reason.
+- **A `... | while read` loop in the harness runs in a SUBSHELL**, so every `ok`/`bad`
+  inside increments `PASS`/`FAIL` in a child and the summary never sees them — six rows of
+  `uname` assertions that could not fail the suite. Iterate with `for` over a
+  colon-delimited list instead. Same family as every other vacuous-guard trap here: the
+  test *ran*, and its result went nowhere.
+- **`curl`/`wget` cannot be sandboxed by shadowing.** "No downloader on this box" means
+  `command -v curl` *fails*, and a stub makes it succeed. `test/plugin_install_test.sh`
+  builds a second PATH by symlinking every system binary **except** those two — by
+  wildcard, not a curated list, because a tool missing from a hand-written list (`grep`,
+  `mktemp`) makes the case pass for the wrong reason. It asserts both directions at
+  startup, and `dl-8b` is the positive control: the same sandbox *with* curl must download.
 - **`t.TempDir()` is itself under a symlink on macOS** (`/var` -> `/private/var`),
   so scope tests compare against `normalizePath(tmp)`, never the raw temp path.
 - **Resolution costs one `tmux display-message`** (~5ms of a ~5.7ms cold median),

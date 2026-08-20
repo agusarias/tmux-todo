@@ -20,6 +20,11 @@
 #     22 assertions "failed for the wrong reason". The sandbox PATH now carries
 #     a bash symlink and the script is executed through its own shebang, which
 #     tests the exec bit too.
+#   * The download step would otherwise reach the REAL GitHub release from every
+#     case that resolves nothing — a network call per case, and an assertion that
+#     starts failing the day v0.1.0 ships. Every run therefore gets
+#     $TDO_RELEASE_BASE_URL pointed at a local fixture, defaulting to one that
+#     does not exist, so a case downloads only what it opted into.
 #
 # PLUGIN_SCRIPT may point at a mutated copy of the script; that is how the
 # body-grep guard is shown to be load-bearing rather than trivially satisfied.
@@ -72,14 +77,85 @@ for d in /usr/bin /bin /usr/sbin /sbin; do
         fi
     done
 done
+# `curl` and `wget` cannot be sandboxed by shadowing: "no downloader on this box"
+# means `command -v curl` FAILS, and a stub makes it succeed. So one PATH is
+# built with everything the script needs except those two — by wildcard rather
+# than a curated list, because a tool missing from a hand-written list would make
+# the case pass for the wrong reason (`grep` absent = the guard never runs).
+SYSBIN_NO_DL=$TMPROOT/sysbin-no-downloader
+mkdir -p "$SYSBIN_NO_DL"
+for d in /usr/bin /bin /usr/sbin /sbin; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+        n=${f##*/}
+        case $n in curl|wget) continue ;; esac
+        [ -e "$SYSBIN_NO_DL/$n" ] || ln -s "$f" "$SYSBIN_NO_DL/$n" 2>/dev/null
+    done
+done
+for t in curl wget; do
+    if ( PATH=$SYSBIN_NO_DL; export PATH; command -v "$t" >/dev/null 2>&1 ); then
+        echo "FAIL: $t is still reachable in the no-downloader sandbox. Aborting."
+        exit 1
+    fi
+done
+# ...and the same sandbox must NOT be degenerate: a PATH missing grep or mktemp
+# would make the download cases pass without the script ever getting that far.
+for t in grep mktemp mkdir mv rm chmod awk uname; do
+    if ! ( PATH=$SYSBIN_NO_DL; export PATH; command -v "$t" >/dev/null 2>&1 ); then
+        echo "FAIL: the no-downloader sandbox has no $t, so its cases would be"
+        echo "      vacuous rather than failing loudly. Aborting."
+        exit 1
+    fi
+done
+
+# The base URL every case gets unless it sets RELEASE_BASE itself. It must not
+# exist: a case that has not built a fixture must get a failed download, never a
+# request to github.com.
+NO_RELEASE_URL="file://$TMPROOT/no-such-release"
+if [ -e "$TMPROOT/no-such-release" ]; then
+    echo "FAIL: $TMPROOT/no-such-release exists; the default fixture must be absent."
+    exit 1
+fi
+
+# The asset this machine's uname maps to, computed independently of the script so
+# it is a real expectation rather than an echo of the code under test.
+case $(uname -s) in
+    Darwin) HOST_OS=darwin ;;
+    Linux)  HOST_OS=linux ;;
+    *)      HOST_OS='' ;;
+esac
+case $(uname -m) in
+    x86_64|amd64)  HOST_ARCH=amd64 ;;
+    arm64|aarch64) HOST_ARCH=arm64 ;;
+    *)             HOST_ARCH='' ;;
+esac
+HOST_ASSET=''
+[ -z "$HOST_OS$HOST_ARCH" ] || HOST_ASSET="tdo-$HOST_OS-$HOST_ARCH"
+
+SHA_TOOL=''
+if command -v sha256sum >/dev/null 2>&1; then SHA_TOOL='sha256sum'
+elif command -v shasum >/dev/null 2>&1; then SHA_TOOL='shasum -a 256'
+fi
+
+# A fixture release is served over real HTTP when python3 is here, and over
+# file:// otherwise. HTTP is worth the process: it is the only way a case gets a
+# genuine 404 rather than a missing local file, and `curl -f` is precisely what
+# turns that 404 into a failure instead of a 9-byte HTML page installed as
+# bin/tdo. wget also refuses file:// URLs outright, so the wget leg needs it.
+PY3=$(command -v python3 || true)
+FIXTURE_PIDS=()
+
 SOCKETS=()
 PASS=0
 FAIL=0
 
 cleanup() {
-    local s
+    local s pid
     for s in ${SOCKETS[@]+"${SOCKETS[@]}"}; do
         "$REAL_TMUX" -L "$s" kill-server >/dev/null 2>&1
+    done
+    for pid in ${FIXTURE_PIDS[@]+"${FIXTURE_PIDS[@]}"}; do
+        kill "$pid" >/dev/null 2>&1
     done
     rm -rf "$TMPROOT"
 }
@@ -89,6 +165,10 @@ echo "plugin script : $PLUGIN_SCRIPT"
 echo "tmux          : $REAL_TMUX ($("$REAL_TMUX" -V))"
 echo "bash          : $REAL_BASH ($("$REAL_BASH" --version | head -1))"
 echo "go            : ${REAL_GO:-none} (usable for the build case: $GO_OK)"
+echo "host asset    : ${HOST_ASSET:-<unmapped platform>}"
+echo "sha256 tool   : ${SHA_TOOL:-none}"
+echo "downloader    : curl=$(command -v curl || echo none) wget=$(command -v wget || echo none)"
+echo "fixture server: ${PY3:-none (fixtures fall back to file://)}"
 
 # ---------------------------------------------------------------- assertions
 
@@ -107,6 +187,19 @@ assert_absent() { # haystack needle label
 assert_no_file() { # path label
     if [ -e "$1" ]; then bad "$2 ($1 exists)"; else ok "$2"; fi
 }
+assert_file() { # path label
+    if [ -e "$1" ]; then ok "$2"; else bad "$2 ($1 missing)"; fi
+}
+assert_exec() { # path label
+    if [ -x "$1" ]; then ok "$2"; else bad "$2 ($1 not executable)"; fi
+}
+# The temp file the download writes through must never survive a run: a
+# leftover .tdo.XXXXXX is a half-written binary sitting next to the real one.
+assert_no_temp_leftover() { # bindir label
+    local n
+    n=$(ls -a "$1" 2>/dev/null | grep -c '^\.tdo\.')
+    if [ "$n" = 0 ]; then ok "$2"; else bad "$2 ($n leftover .tdo.* in $1)"; fi
+}
 
 # ---------------------------------------------------------------- case setup
 
@@ -118,6 +211,10 @@ assert_no_file() { # path label
 case_start() {
     CASE=$1
     CASEDIR=$TMPROOT/$CASE
+    # Opt-in knobs, reset per case: RELEASE_BASE points the download step at a
+    # fixture, RUN_PATH replaces the sandbox PATH wholesale.
+    RELEASE_BASE=''
+    RUN_PATH=''
     PLUGINDIR=$CASEDIR/plugin
     PATHDIR=$CASEDIR/path
     SOCK=tdoplug-$$-$CASE
@@ -134,7 +231,14 @@ case_start() {
     printf '\n== %s\n' "$CASE"
 }
 
-case_end() { "$REAL_TMUX" -L "$SOCK" kill-server >/dev/null 2>&1; }
+case_end() {
+    local pid
+    "$REAL_TMUX" -L "$SOCK" kill-server >/dev/null 2>&1
+    for pid in ${FIXTURE_PIDS[@]+"${FIXTURE_PIDS[@]}"}; do
+        kill "$pid" >/dev/null 2>&1
+    done
+    FIXTURE_PIDS=()
+}
 
 stub() { # path [stdout-line]
     mkdir -p "$(dirname -- "$1")"
@@ -149,8 +253,90 @@ stub() { # path [stdout-line]
 # Runs the real script the way tmux does: executed directly, so the shebang and
 # the exec bit are both exercised. Captures stdout+stderr for diagnostics.
 plugin_run() {
-    env -i HOME="$HOME" PATH="$PATHDIR:$SYS_PATH" TERM=dumb TMPDIR="${TMPDIR:-/tmp}" \
+    env -i HOME="$HOME" PATH="${RUN_PATH:-$PATHDIR:$SYS_PATH}" TERM=dumb \
+        TMPDIR="${TMPDIR:-/tmp}" \
+        TDO_RELEASE_BASE_URL="${RELEASE_BASE:-$NO_RELEASE_URL}" \
         "$PLUGINDIR/tmux-todo.tmux" 2>&1
+}
+
+# A stand-in release, served over file://. The URL construction, the fetch, the
+# checksum comparison and the atomic move are all the real code paths; only the
+# transport is local. The same leg against a real GitHub asset belongs to
+# docs/tasks/2026-08-20-prove-ci-and-cut-v0.1.0.md, which owns the first tag.
+#
+# Every asset is a runnable stub whose body names itself, so an assertion can
+# tell WHICH asset was installed — that is what makes the uname table real.
+fixture_release() { # <dir> <asset>...
+    local dir=$1 a
+    shift
+    mkdir -p "$dir"
+    for a in "$@"; do
+        printf '#!/bin/sh\necho "%s"\n' "$a" >"$dir/$a"
+        chmod +x "$dir/$a"
+    done
+    ( cd "$dir" && $SHA_TOOL "$@" >checksums.txt )
+    serve_fixture "$dir"
+}
+
+# Sets RELEASE_BASE to a URL serving <dir>. One short-lived python3 http.server
+# on 127.0.0.1 per fixture, on a kernel-assigned port so parallel runs cannot
+# collide; file:// is the fallback when python3 is absent, at the cost of the
+# 404 and wget legs.
+serve_fixture() { # dir
+    local log port i
+    if [ -z "$PY3" ]; then
+        RELEASE_BASE="file://$1"
+        return 0
+    fi
+    log=$TMPROOT/httpd-$CASE.log
+    # -u, or python buffers the "Serving HTTP on ... port NNNNN" line when stdout
+    # is a file and the port is never read — which does not fail, it silently
+    # falls back to file:// and takes the real-404 and wget legs with it.
+    # disown, or the shell announces every teardown with a "Terminated: 15" line.
+    "$PY3" -u -m http.server --bind 127.0.0.1 --directory "$1" 0 >"$log" 2>&1 &
+    FIXTURE_PIDS+=($!)
+    disown %% 2>/dev/null || true
+    port=''
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        port=$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$log" 2>/dev/null | head -1)
+        [ -n "$port" ] && break
+        sleep 0.2
+    done
+    if [ -z "$port" ]; then
+        printf '    -- NO fixture server (%s); falling back to file://, so this\n' \
+            "$(head -1 "$log" 2>/dev/null || true)"
+        printf '       case no longer covers a real HTTP 404\n'
+        RELEASE_BASE="file://$1"
+        return 0
+    fi
+    RELEASE_BASE="http://127.0.0.1:$port"
+}
+
+# The same, with one asset's recorded sum corrupted. Not a truncated file and not
+# a missing line: a checksums.txt that positively DISAGREES, which is the one
+# case DoD 8 says must be fatal.
+fixture_release_bad_sum() { # <dir> <asset>...
+    fixture_release "$@"
+    local dir=$1 asset=$2
+    awk -v a="$asset" '{ if ($2 == a) print "0000000000000000000000000000000000000000000000000000000000000000  " a; else print }' \
+        "$dir/checksums.txt" >"$dir/checksums.txt.new"
+    mv "$dir/checksums.txt.new" "$dir/checksums.txt"
+}
+
+# uname, table-tested: the script asks for -s and -m separately, so the stub
+# answers per flag.
+stub_uname() { # <path> <uname -s> <uname -m>
+    printf '#!/bin/sh\ncase $1 in\n-s) echo "%s" ;;\n-m) echo "%s" ;;\n*) echo "%s" ;;\nesac\n' \
+        "$2" "$3" "$2" >"$1"
+    chmod +x "$1"
+}
+
+# A downloader that must never run. Touching a canary rather than merely failing
+# is what turns "the steady state does no network call" into an assertion instead
+# of a hope.
+stub_loud_downloader() { # <path> <canary>
+    printf '#!/bin/sh\ntouch %s\nexit 1\n' "$2" >"$1"
+    chmod +x "$1"
 }
 
 tm() { "$REAL_TMUX" -L "$SOCK" "$@"; }
@@ -296,6 +482,266 @@ assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
 assert_contains "$out" "tdo" "the diagnostic names the binary"
 case_end
 
+# ================================================== download (step 3)
+
+# Everything here needs a name to fetch and a way to check a sum. Without either,
+# SKIP loudly rather than pass quietly.
+if [ -z "$HOST_ASSET" ] || [ -z "$SHA_TOOL" ]; then
+    printf '\n== download\n    SKIP asset=%s sha=%s on %s/%s\n' \
+        "${HOST_ASSET:-none}" "${SHA_TOOL:-none}" "$(uname -s)" "$(uname -m)"
+else
+
+# The happy path: an asset for this platform whose sum is in checksums.txt.
+case_start dl-1-verified
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+assert_no_file "$PLUGINDIR/bin/tdo" "precondition: no binary before the run"
+out=$(plugin_run)
+assert_exec "$PLUGINDIR/bin/tdo" "the download landed an executable bin/tdo"
+assert_eq "$HOST_ASSET" "$("$PLUGINDIR/bin/tdo" 2>/dev/null)" "and it is the asset for THIS platform"
+assert_eq 1 "$(count_plugin_keybinds_for t)" "one popup keybind on t"
+assert_contains "$(plugin_keybinds_for t)" "$PLUGINDIR/bin/tdo tui" "keybind points at the downloaded binary"
+assert_eq 1 "$(count_tdo_hooks)" "one tdo session-renamed hook"
+assert_contains "$out" "downloading" "the one-off download is announced"
+assert_absent "$out" "UNVERIFIED" "no unverified warning when the sum checks out"
+assert_no_temp_leftover "$PLUGINDIR/bin" "no leftover .tdo.* temp file"
+# ...and the next server start resolves at step 2, so it must not download again.
+stamp_before=$(ls -l "$PLUGINDIR/bin/tdo")
+out2=$(plugin_run)
+assert_eq "$stamp_before" "$(ls -l "$PLUGINDIR/bin/tdo")" "a second run does not re-download"
+assert_eq "" "$out2" "and is silent"
+case_end
+
+# DoD 8's fatal case, and the highest-risk line in the whole plugin: a
+# checksums.txt that positively DISAGREES with what arrived. Not a missing file
+# and not a missing line — those are the best-effort cases below. The mutation
+# proof for this assertion lives in the task brief's Evidence: with the checksum
+# comparison deleted, these four assertions must fail.
+case_start dl-2-checksum-mismatch
+fixture_release_bad_sum "$CASEDIR/release" "$HOST_ASSET"
+out=$(plugin_run)
+assert_no_file "$PLUGINDIR/bin/tdo" "a mismatching download is NOT installed"
+assert_no_temp_leftover "$PLUGINDIR/bin" "and the temp copy is deleted, not left behind"
+assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
+assert_eq 0 "$(count_tdo_hooks)" "no hook installed"
+assert_contains "$out" "checksum" "the diagnostic names the checksum"
+case_end
+
+# A release that exists but has no asset for this platform. Over HTTP this is a
+# real 404, which is what makes `curl -f` load-bearing: without it curl saves the
+# error page and exits 0, so bin/tdo becomes an HTML document the keybind then
+# points at.
+case_start dl-3-asset-404
+fixture_release "$CASEDIR/release" tdo-linux-riscv64
+out=$(plugin_run)
+assert_no_file "$PLUGINDIR/bin/tdo" "a 404 installs nothing"
+assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
+assert_no_temp_leftover "$PLUGINDIR/bin" "no leftover .tdo.* temp file"
+assert_contains "$out" "$HOST_ASSET" "the diagnostic names the asset it wanted"
+case_end
+
+# Best-effort verification, case 1: no checksums.txt at all. The user's ruling is
+# that this must not block an install — but it must not be silent either, so the
+# warning goes through the same display-message channel as the no-binary path.
+case_start dl-4-no-checksums-file
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+rm -f "$CASEDIR/release/checksums.txt"
+out=$(plugin_run)
+assert_exec "$PLUGINDIR/bin/tdo" "best-effort: the download is used anyway"
+assert_eq 1 "$(count_plugin_keybinds_for t)" "and the keybind is installed"
+assert_contains "$out" "UNVERIFIED" "the diagnostic says it is unverified"
+assert_contains "$(tm show-messages 2>/dev/null)" "UNVERIFIED" "and the user is told via display-message"
+case_end
+
+# Best-effort verification, case 2: a checksums.txt that simply has no line for
+# this asset. Distinct from case 1 in the code and worth its own case — reading
+# "no line" as a mismatch would block installs on any release whose checksums
+# file lags a platform.
+case_start dl-5-asset-absent-from-checksums
+fixture_release "$CASEDIR/release" "$HOST_ASSET" tdo-linux-riscv64
+awk -v a="$HOST_ASSET" '$2 != a' "$CASEDIR/release/checksums.txt" >"$CASEDIR/sums.new"
+mv "$CASEDIR/sums.new" "$CASEDIR/release/checksums.txt"
+assert_absent "$(cat "$CASEDIR/release/checksums.txt")" "$HOST_ASSET" "precondition: our asset is not in checksums.txt"
+out=$(plugin_run)
+assert_exec "$PLUGINDIR/bin/tdo" "best-effort: the download is used anyway"
+assert_contains "$out" "UNVERIFIED" "the diagnostic says it is unverified"
+case_end
+
+# Offline / DNS failure. The stub is what a real curl does on an unreachable
+# host: nothing written, non-zero exit. The canary makes "the downloader ran" an
+# assertion rather than an inference.
+case_start dl-6-offline
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+stub_loud_downloader "$PATHDIR/curl" "$CASEDIR/curl-ran"
+stub_loud_downloader "$PATHDIR/wget" "$CASEDIR/wget-ran"
+out=$(plugin_run)
+assert_file "$CASEDIR/curl-ran" "the downloader was invoked"
+assert_no_file "$PLUGINDIR/bin/tdo" "a failing downloader installs nothing"
+assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
+assert_no_temp_leftover "$PLUGINDIR/bin" "no leftover .tdo.* temp file"
+case_end
+
+# A 403 / rate limit, which `curl -f` reports as exit 22 with no body saved. The
+# script's contract is the same for every non-zero downloader exit, and this
+# pins that the contract is "fall through", not "fail the tmux server start".
+case_start dl-7-http-error
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+printf '#!/bin/sh\nexit 22\n' >"$PATHDIR/curl"
+chmod +x "$PATHDIR/curl"
+printf '#!/bin/sh\nexit 8\n' >"$PATHDIR/wget"
+chmod +x "$PATHDIR/wget"
+out=$(plugin_run)
+assert_no_file "$PLUGINDIR/bin/tdo" "an HTTP error installs nothing"
+assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
+case_end
+
+# No downloader on the box at all — `command -v curl` must FAIL, which a stub
+# cannot express, so this case swaps the whole PATH for the no-downloader
+# sandbox. That sandbox is asserted non-degenerate at startup, and the control
+# case below closes the loop.
+case_start dl-8-no-downloader
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+RUN_PATH="$PATHDIR:$SYSBIN_NO_DL"
+out=$(plugin_run)
+assert_no_file "$PLUGINDIR/bin/tdo" "nothing downloaded with neither curl nor wget"
+assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
+assert_contains "$out" "curl" "the diagnostic names what is missing"
+case_end
+
+# The control for dl-8: the SAME sandbox, plus curl, must succeed. Without this,
+# dl-8 would pass just as green if the sandbox were missing `mktemp` or `awk`.
+if [ -n "$(command -v curl || true)" ]; then
+    case_start dl-8b-no-downloader-control
+    fixture_release "$CASEDIR/release" "$HOST_ASSET"
+    ln -s "$(command -v curl)" "$PATHDIR/curl"
+    RUN_PATH="$PATHDIR:$SYSBIN_NO_DL"
+    out=$(plugin_run)
+    assert_exec "$PLUGINDIR/bin/tdo" "the same sandbox WITH curl does download, so dl-8 is not vacuous"
+    assert_eq "$HOST_ASSET" "$("$PLUGINDIR/bin/tdo" 2>/dev/null)" "and installed the right asset"
+    case_end
+fi
+
+# wget is the other half of DoD 10 and takes a different argument spelling, so it
+# gets its own leg rather than being assumed equivalent. It cannot be tested
+# against a file:// fixture: wget rejects that scheme outright.
+if [ -n "$(command -v wget || true)" ] && [ -n "$PY3" ]; then
+    case_start dl-9-wget-only
+    fixture_release "$CASEDIR/release" "$HOST_ASSET"
+    ln -s "$(command -v wget)" "$PATHDIR/wget"
+    RUN_PATH="$PATHDIR:$SYSBIN_NO_DL"
+    out=$(plugin_run)
+    assert_exec "$PLUGINDIR/bin/tdo" "wget alone is enough to download"
+    assert_eq "$HOST_ASSET" "$("$PLUGINDIR/bin/tdo" 2>/dev/null)" "and it installed the right asset"
+    assert_eq 1 "$(count_plugin_keybinds_for t)" "one popup keybind on t"
+    case_end
+else
+    printf '\n== dl-9-wget-only\n    SKIP wget=%s python3=%s\n' \
+        "$(command -v wget || echo none)" "${PY3:-none}"
+fi
+
+# uname, table-tested. Four platforms, one asset each, all four served at once —
+# so a mapping that is merely *plausible* installs the wrong file and the
+# assertion says which. `arm64` vs `aarch64` and `x86_64` vs `amd64` are the two
+# places this goes wrong, and both directions get a row.
+printf '\n== dl-10-uname-table\n'
+# NOT `... | while read`: a pipeline runs its right-hand side in a SUBSHELL, so
+# every ok/bad inside would increment PASS and FAIL in a child process and the
+# summary would never see them — six rows of assertions that cannot fail the
+# suite. Iterating in the current shell is the whole point here.
+for row in Darwin:arm64:tdo-darwin-arm64 \
+           Darwin:x86_64:tdo-darwin-amd64 \
+           Darwin:amd64:tdo-darwin-amd64 \
+           Linux:x86_64:tdo-linux-amd64 \
+           Linux:aarch64:tdo-linux-arm64 \
+           Linux:arm64:tdo-linux-arm64; do
+    u_s=${row%%:*}
+    u_m=${row#*:}; u_m=${u_m%%:*}
+    want=${row##*:}
+    case_start "dl-10-uname-$u_s-$u_m"
+    fixture_release "$CASEDIR/release" \
+        tdo-darwin-arm64 tdo-darwin-amd64 tdo-linux-amd64 tdo-linux-arm64
+    stub_uname "$PATHDIR/uname" "$u_s" "$u_m"
+    out=$(plugin_run)
+    if [ -x "$PLUGINDIR/bin/tdo" ]; then
+        assert_eq "$want" "$("$PLUGINDIR/bin/tdo" 2>/dev/null)" "uname -s=$u_s -m=$u_m installs $want"
+    else
+        bad "uname -s=$u_s -m=$u_m installed nothing (wanted $want; output: $out)"
+    fi
+    case_end
+done
+
+# ...and a platform we ship no binary for skips the step entirely and falls
+# through. Two rows: an unmapped OS and an unmapped machine.
+for row in FreeBSD:amd64 Linux:riscv64; do
+    u_s=${row%%:*}
+    u_m=${row##*:}
+    case_start "dl-11-unmapped-$u_s-$u_m"
+    fixture_release "$CASEDIR/release" \
+        tdo-darwin-arm64 tdo-darwin-amd64 tdo-linux-amd64 tdo-linux-arm64
+    stub_uname "$PATHDIR/uname" "$u_s" "$u_m"
+    out=$(plugin_run)
+    assert_no_file "$PLUGINDIR/bin/tdo" "uname -s=$u_s -m=$u_m downloads nothing"
+    assert_eq 0 "$(count_plugin_keybinds_for t)" "and installs NO popup keybind"
+    assert_contains "$out" "no released binary" "the diagnostic says the platform is unsupported"
+    case_end
+done
+
+# Precedence, the two directions that matter. A user's own tdo and an existing
+# plugin-local binary must both beat the download, or an install that works today
+# starts making a network call at every tmux server start.
+case_start dl-12-path-beats-download
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+stub "$PATHDIR/tdo"
+out=$(plugin_run)
+assert_contains "$(plugin_keybinds_for t)" "$PATHDIR/tdo tui" "PATH wins over the download"
+assert_no_file "$PLUGINDIR/bin/tdo" "and nothing was downloaded at all"
+case_end
+
+case_start dl-13-plugin-bin-beats-download
+fixture_release "$CASEDIR/release" "$HOST_ASSET"
+stub "$PLUGINDIR/bin/tdo" existing-build
+out=$(plugin_run)
+assert_eq existing-build "$("$PLUGINDIR/bin/tdo" 2>/dev/null)" "the existing plugin binary is untouched"
+assert_contains "$(plugin_keybinds_for t)" "$PLUGINDIR/bin/tdo tui" "and is what the keybind points at"
+case_end
+
+# ...and the download must beat the source build, which is the ordering ruling
+# this task exists for: a fresh install on a machine WITH go must still not spend
+# a compile.
+if [ "$GO_OK" = yes ]; then
+    case_start dl-14-download-beats-go-build
+    fixture_release "$CASEDIR/release" "$HOST_ASSET"
+    cp -R "$REPO_ROOT/go.mod" "$REPO_ROOT/go.sum" "$REPO_ROOT/cmd" "$REPO_ROOT/internal" "$PLUGINDIR/"
+    ln -s "$REAL_GO" "$PATHDIR/go"
+    out=$(plugin_run)
+    assert_eq "$HOST_ASSET" "$("$PLUGINDIR/bin/tdo" 2>/dev/null)" "the DOWNLOAD won, not the build"
+    assert_absent "$out" "building" "no build was announced"
+    case_end
+else
+    printf '\n== dl-14-download-beats-go-build\n    SKIP no go >= 1.25 on PATH\n'
+fi
+
+# ...but a failed download must still leave the source build its turn, or the new
+# step 3 has silently replaced step 4 instead of preceding it.
+if [ "$GO_OK" = yes ]; then
+    case_start dl-15-failed-download-falls-through-to-build
+    cp -R "$REPO_ROOT/go.mod" "$REPO_ROOT/go.sum" "$REPO_ROOT/cmd" "$REPO_ROOT/internal" "$PLUGINDIR/"
+    ln -s "$REAL_GO" "$PATHDIR/go"
+    # No fixture at all: RELEASE_BASE stays the default, which does not exist.
+    out=$(plugin_run)
+    assert_exec "$PLUGINDIR/bin/tdo" "the source build still ran after the download failed"
+    assert_contains "$out" "building" "and announced itself"
+    if "$PLUGINDIR/bin/tdo" --version >/dev/null 2>&1; then
+        ok "the built binary runs (--version exits 0)"
+    else
+        bad "the built binary does not run"
+    fi
+    case_end
+else
+    printf '\n== dl-15-failed-download-falls-through-to-build\n    SKIP no go >= 1.25 on PATH\n'
+fi
+
+fi # HOST_ASSET / SHA_TOOL guard
+
 # ============================================================= @todo-key
 
 case_start key-default
@@ -418,6 +864,22 @@ if [ "$start" != 0 ] && [ "$end" != 0 ]; then
     printf '    -- steady state: %s ms/run over %s runs (whole script: 4 tmux calls)\n' \
         "$(( (end - start) / runs ))" "$runs"
 fi
+case_end
+
+# The other half of the steady-state promise, and the one the download step put
+# at risk: tmux sources this script on EVERY server start, so a network call on
+# the resolved path would cost a round-trip — or a hang, offline — every time.
+# The downloader is present but booby-trapped: invoking it leaves a canary.
+case_start steady-state-no-network
+fixture_release "$CASEDIR/release" "${HOST_ASSET:-tdo-linux-amd64}"
+stub "$PLUGINDIR/bin/tdo"
+stub_loud_downloader "$PATHDIR/curl" "$CASEDIR/curl-ran"
+stub_loud_downloader "$PATHDIR/wget" "$CASEDIR/wget-ran"
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for t)" "keybind installed"
+assert_no_file "$CASEDIR/curl-ran" "curl was never invoked"
+assert_no_file "$CASEDIR/wget-ran" "wget was never invoked"
+assert_eq "" "$out" "and the steady-state run is silent"
 case_end
 
 # ================================================================== summary
