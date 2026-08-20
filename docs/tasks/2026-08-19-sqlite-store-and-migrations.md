@@ -1,7 +1,7 @@
 # SQLite Store And Migrations
 
-**Status:** ready
-**Worktree:** none
+**Status:** review
+**Worktree:** none (removed after merge)
 
 ## Goal
 Implement the SQLite store at `~/.local/share/tmux-todo/tasks.db` with the v1 `tasks`
@@ -174,6 +174,32 @@ side effects, no network.
   carry no scope key; `done` and `done_at` agree). They are consistency guards over the
   design's v1 column set, not new fields, so they do not contradict docs/design.md.
 
+- **2026-08-20 (executor, race fix):** The curator's diagnosis was right about cause (1) and
+  half-right about (2). Reordering `busy_timeout` ahead of `journal_mode` on the DSN was not
+  enough: with the runner fixed, the failure simply moved to `acquire connection: database is
+  locked`, because **SQLite answers a `journal_mode` change with `SQLITE_BUSY` without
+  consulting `busy_timeout`** when another connection is reading. As a DSN pragma it fires on
+  every new pooled connection, so no timeout ordering can save it. WAL is a property of the
+  file, not of a connection: `Open` now calls `ensureJournalMode` once (bounded retry, 50 ×
+  20ms), and only `busy_timeout` and `foreign_keys` — genuinely per-connection — stay on the
+  DSN. Found by running the new test 20x rather than once.
+- **2026-08-20 (executor):** The migration run holds **one** `BEGIN IMMEDIATE` transaction
+  across the version-table bootstrap, the version read and the apply loop, driven with raw
+  `BEGIN`/`COMMIT` on a pinned `*sql.Conn` because `database/sql` has no API for the
+  IMMEDIATE variant. A deferred `BeginTx` would take its write lock at the first write, by
+  which point both processes have already read version 0. Each migration keeps its own
+  `SAVEPOINT`, so DoD 2's "each in a single transaction" still holds: a failing 002 leaves
+  001 applied and the version at 1.
+- **2026-08-20 (executor):** Added `TestConcurrentUpgradeAppliesOnce` beyond DoD 13's letter.
+  DoD 13 names two windows — first install and the first opens after a release adding
+  `002_*.sql` — and the fresh-file test only covers the first. This one races four handles
+  applying an injected 002.
+- **2026-08-20 (executor):** Each new test was checked against the *old* implementation
+  (stash the two source files, re-run) to confirm it actually fails. A regression test that
+  passes either way is worse than none, and the in-process test proved probabilistic: 1 of 3
+  pre-fix runs, versus 3 of 3 for the upgrade test. That is why the two-process shell check
+  stays part of Verification rather than being replaced by the Go test.
+
 ## Plan
 Approved at Checkpoint 1, 2026-08-19.
 
@@ -230,155 +256,159 @@ completed-task-lifecycle task decides it.
 
 ## Evidence
 
-Executed 2026-08-19 in worktree `/Users/agusarias/workspace/todo-sqlite-store`
-(branch `sqlite-store-and-migrations`, now merged and removed).
+Two passes. The first implemented the task (merge `fda2791`, kept on `main` at
+Checkpoint 2); this second one fixes the concurrent-first-open defect that audit
+found. The first pass's evidence was replaced rather than appended to, per the
+plan revision — its numbers described the pre-fix build.
 
-**Merge commit: `fda2791`** — fast-forward onto `main`, 10 files, +1488/-123.
-Not pushed. Review with `git show fda2791`.
+Executed 2026-08-20 in worktree `/Users/agusarias/workspace/todo-sqlite-store-race`
+(branch `sqlite-store-race-fix`, rebased onto `main`, merged and removed).
 
-### Store test suite (all 23 tests, real SQLite files under `t.TempDir()`)
+**Merge commit: `5cfafb4`** — fast-forward onto `main`, 4 files, +322/-48.
+Not pushed. Review with `git show 5cfafb4`. The task's full diff is
+`git diff 5bba1c0..5cfafb4`.
 
-```
-$ go test ./internal/store/ -v -count=1
---- PASS: TestOpenMigratesToLatest (0.01s)
---- PASS: TestReopenIsANoOp (0.00s)                       <- DoD 3
---- PASS: TestFailedMigrationRollsBack (0.00s)            <- DoD 2
---- PASS: TestSchemaVersionIsStructurallySingleRow (0.00s) <- DoD 4
---- PASS: TestLegacyVersionTableIsReplaced (0.00s)
---- PASS: TestLegacyVersionTableWithDataIsRefused (0.00s)
---- PASS: TestParseMigrationName (0.00s)
---- PASS: TestLoadMigrationsIsOrdered (0.00s)
---- PASS: TestOpenAppliesPragmas (0.00s)                  <- DoD 5
---- PASS: TestOpenCreatesMissingDirectories (0.00s)
---- PASS: TestOpenRejectsEmptyPath (0.00s)
---- PASS: TestDefaultPathHonoursXDG (0.00s)
---- PASS: TestAddListRoundTrip (0.00s)                    <- DoD 8
---- PASS: TestCompleteUncompleteDoneAt (0.00s)            <- DoD 8
---- PASS: TestListOrdering (0.00s)                        <- DoD 7
---- PASS: TestListSameSecondTiebreak (0.00s)
---- PASS: TestListFiltersByScope (0.00s)
---- PASS: TestListGroupedIncludesInactiveScopes (0.00s)   <- DoD 7
---- PASS: TestUpdateTextRescopeDelete (0.00s)
---- PASS: TestMissingIDReportsNotFound (0.00s)
---- PASS: TestValidationRejectsBadInput (0.00s)
---- PASS: TestPurgeDoneUsesCallerCutoff (0.00s)
---- PASS: TestConcurrentHandles (0.02s)                   <- DoD 9
-ok  	github.com/agusarias/tmux-todo/internal/store	0.368s
-```
+Rebased rather than merged with a commit: the curator landed `d428920` on `main`
+while this ran, and a fast-forward keeps `git show <hash>` showing the real diff.
 
-Full sweep, clean:
+### DoD 13 — the curator's reproduction, before and after
+
+Same command, same machine, 25 iterations of two `tdo doctor` processes racing on
+one fresh `XDG_DATA_HOME`:
 
 ```
+BEFORE (fda2791):  11 / 25 runs failed
+  run 7: 1/0 :: tdo: inspect schema_version: database is locked (5) (SQLITE_BUSY)
+  run 8: 0/1 :: tdo: inspect schema_version: database is locked (5) (SQLITE_BUSY)
+  … 9 more identical failures …
+
+AFTER (5cfafb4):    0 / 25 runs failed
+```
+
+Widened, since two processes is the easy case:
+
+```
+3-way, 25 iterations:                     0 / 25 failed
+6-way, 15 iterations:                     0 / 15 failed
+already-migrated database, 25 iterations: 0 / 25 failed   (regression check)
+```
+
+### The tests fail against the old implementation
+
+The point of a regression test is that it would have caught the bug, so this was
+checked rather than assumed — implementation stashed, tests re-run:
+
+```
+$ git stash push internal/store/store.go internal/store/migrate.go
+$ go test ./internal/store/ -run 'Concurrent|DSN' -count=3
+--- FAIL: TestConcurrentFirstOpen
+    concurrent first Open failed: inspect schema_version: database is locked (5) (SQLITE_BUSY)
+    7 of 8 openers succeeded
+--- FAIL: TestConcurrentUpgradeAppliesOnce
+    concurrent upgrade failed: migration 002_add_widgets: SQL logic error: table widgets already exists (1)
+--- FAIL: TestDSNOrdersBusyTimeoutFirst
+    busy_timeout must precede journal_mode: …_pragma=journal_mode%28WAL%29&_pragma=busy_timeout%285000%29…
+FAIL
+```
+
+Both failure modes the curator saw are reproduced, including the
+`table … already exists` collision. Note `TestConcurrentFirstOpen` failed 1 of 3
+runs there while `TestConcurrentUpgradeAppliesOnce` failed 3 of 3: in-process
+goroutines contend less reliably than separate processes, which is exactly why
+the two-process binary check above is part of the verification and not just the
+Go test.
+
+### Full suite
+
+```
+$ go test ./internal/store/ -v -count=1        (26 tests, all PASS)
+--- PASS: TestOpenMigratesToLatest             --- PASS: TestAddListRoundTrip
+--- PASS: TestReopenIsANoOp                    --- PASS: TestCompleteUncompleteDoneAt
+--- PASS: TestFailedMigrationRollsBack         --- PASS: TestListOrdering
+--- PASS: TestSchemaVersionIsStructurallySingleRow  --- PASS: TestListSameSecondTiebreak
+--- PASS: TestLegacyVersionTableIsReplaced     --- PASS: TestListFiltersByScope
+--- PASS: TestLegacyVersionTableWithDataIsRefused   --- PASS: TestListGroupedIncludesInactiveScopes
+--- PASS: TestParseMigrationName               --- PASS: TestUpdateTextRescopeDelete
+--- PASS: TestLoadMigrationsIsOrdered          --- PASS: TestMissingIDReportsNotFound
+--- PASS: TestConcurrentFirstOpen         <- DoD 13
+--- PASS: TestConcurrentUpgradeAppliesOnce     --- PASS: TestValidationRejectsBadInput
+--- PASS: TestDSNCarriesConnectionPragmasOnly  --- PASS: TestPurgeDoneUsesCallerCutoff
+--- PASS: TestOpenAppliesPragmas          <- DoD 5   --- PASS: TestConcurrentHandles  <- DoD 9
+--- PASS: TestOpenCreatesMissingDirectories
+--- PASS: TestOpenRejectsEmptyPath             ok  internal/store  0.344s
+--- PASS: TestDefaultPathHonoursXDG
+
 $ gofmt -l .            (no output)
 $ go vet ./...          (no output)
-$ go test ./... -count=1
+$ go test ./... -count=5
 ?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
-ok  	github.com/agusarias/tmux-todo/internal/cli	1.183s
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.905s
 ?   	github.com/agusarias/tmux-todo/internal/scope	[no test files]
-ok  	github.com/agusarias/tmux-todo/internal/store	0.725s
-ok  	github.com/agusarias/tmux-todo/internal/task	0.803s
-ok  	github.com/agusarias/tmux-todo/internal/tui	0.965s
+ok  	github.com/agusarias/tmux-todo/internal/store	0.729s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.343s
+ok  	github.com/agusarias/tmux-todo/internal/tui	1.005s
+
+$ CGO_ENABLED=1 go test ./internal/store/ -race -count=2
+ok  	github.com/agusarias/tmux-todo/internal/store	2.378s
+$ go test ./internal/store/ -run 'Concurrent|DSN|Pragma' -count=30
+ok  	github.com/agusarias/tmux-todo/internal/store	3.156s
 ```
+
+The suite ran 5x and the concurrency tests 30x because a flaky fix is worse than
+a visible bug. The race detector needs `CGO_ENABLED=1`; the shipped binary is
+still built with CGO off.
 
 ### The database the binary created (not a test fixture)
 
 ```
-$ XDG_DATA_HOME=…/xdg2 ./bin/tdo doctor
-tdo      5bba1c0-dirty
+$ XDG_DATA_HOME=…/xdg3 ./bin/tdo doctor
+tdo      551bf57-dirty
 runtime  go1.26.6 darwin/arm64
-database …/xdg2/tmux-todo/tasks.db
+database …/xdg3/tmux-todo/tasks.db
 schema   1 (latest 1)
 journal  wal
 tasks    0 pending, 0 total
 ok
-$ echo $?
-0
-
-$ sqlite3 …/xdg2/tmux-todo/tasks.db '.schema'
-CREATE TABLE schema_version (
-		id      INTEGER PRIMARY KEY CHECK (id = 1),
-		version INTEGER NOT NULL
-	);
-CREATE TABLE tasks (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    text       TEXT    NOT NULL,
-    done       INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),
-    done_at    INTEGER,
-    scope_kind TEXT    NOT NULL CHECK (scope_kind IN ('session', 'dir', 'global')),
-    scope_key  TEXT    NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL,
-
-    -- A global task has no key; session and dir tasks must have one.
-    CHECK ((scope_kind = 'global' AND scope_key = '') OR
-           (scope_kind <> 'global' AND scope_key <> '')),
-    -- done and done_at agree: either both set or neither.
-    CHECK ((done = 1 AND done_at IS NOT NULL) OR (done = 0 AND done_at IS NULL))
-);
-CREATE TABLE sqlite_sequence(name,seq);
-CREATE INDEX idx_tasks_scope ON tasks (scope_kind, scope_key, done);
-CREATE INDEX idx_tasks_created_at ON tasks (created_at DESC, id DESC);
 
 $ sqlite3 …/tasks.db 'PRAGMA journal_mode; SELECT * FROM schema_version;'
 wal
 1|1
 ```
 
-The two CHECK constraints beyond the design's column list are consistency
-guards, not new fields: they stop a global task carrying a scope key and stop
-`done` disagreeing with `done_at`. Column set is exactly docs/design.md v1.
+`.schema` output is unchanged from the first pass — this fix touched no SQL — and
+WAL is still in effect despite `journal_mode` no longer being a DSN pragma, which
+is the specific thing that could have regressed.
 
-### Build and linkage
+### Build, linkage and cold start
 
 ```
 $ CGO_ENABLED=0 make build
 $ otool -L bin/tdo
-bin/tdo:
-	/usr/lib/libSystem.B.dylib (compatibility version 0.0.0, current version 0.0.0)
-	/usr/lib/libresolv.9.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+
+500 rows, 10 runs each:
+tdo --version:          median=8.0ms  min=7.6  max=15.5
+tdo doctor (500 rows):  median=8.6ms  min=8.2  max=8.7
 ```
 
-### Cold start with a populated database
-
-500 rows inserted with `sqlite3`, then 10 runs each (`time.perf_counter()` around
-`subprocess.run`):
-
-```
-tdo --version:                                            median=7.9ms  min=6.9  max=19.4
-tdo doctor (500 rows, open + migrate check + 2 counts):   median=8.3ms  min=7.8  max=16.4
-```
-
-Opening the database, checking migrations and running two aggregate queries costs
-~0.4ms on top of process start, against a ~100ms budget. Note this measures
-`Count`, not `List` — there is no CLI list command until the cli-surface task, so
-full-list latency gets measured there.
-
-### Driver behaviour probed before writing the runner
-
-Two facts were established empirically rather than assumed, both of which shaped
-the implementation:
-
-1. `?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)`
-   on the DSN reaches pooled connections — read back as `wal` / `5000` / `1`.
-   A post-open `Exec` would have applied to one connection only.
-2. A multi-statement `Exec` returns the failure but **leaves earlier statements
-   applied**: `CREATE TABLE a (x); CREATE TABLE bad (((` errored and left `a`
-   behind. Outside a transaction the runner would strand partial DDL, so the
-   per-migration transaction is doing real work — `TestFailedMigrationRollsBack`
-   asserts the partial table is genuinely absent, not merely that an error came back.
+8.6ms against a ~100ms budget. `ensureJournalMode` adds one `PRAGMA journal_mode`
+read per open, ~0.3ms over the first pass's 8.3ms.
 
 ### Definition of done
 
 | # | Item | Status |
 |---|---|---|
-| 1 | `001_init.sql` embedded, v1 columns | met |
-| 2 | Runner applies above-version migrations in one transaction; failure rolls back | met — `TestFailedMigrationRollsBack` |
-| 3 | Second run is a no-op | met — `TestReopenIsANoOp` (version and 3 rows unchanged) |
-| 4 | `schema_version` structurally single-row | met — second row and duplicate id both rejected |
-| 5 | WAL / busy_timeout / foreign_keys on every Open, WAL asserted | met — `TestOpenAppliesPragmas` |
-| 6 | Full ctx-taking API on domain types | met — plus `ListGrouped` for the all-tasks view |
-| 7 | `List` scope-filtered + tier ordering; grouped listing incl. inactive scopes | met |
-| 8 | Unix-second timestamps, `DoneAt` nil/non-nil round-trip | met |
-| 9 | Two handles, interleaved writes and reads, no SQLITE_BUSY | met — 4 goroutines × 40 rounds |
+| 1 | `001_init.sql` embedded, v1 columns | met (unchanged) |
+| 2 | Per-migration transaction; failure rolls back, version untouched | met — now a savepoint inside the run's transaction |
+| 3 | Second run is a no-op | met — `TestReopenIsANoOp` |
+| 4 | `schema_version` structurally single-row | met |
+| 5 | WAL / busy_timeout / foreign_keys on every Open, WAL asserted | met — WAL now via `ensureJournalMode`, not the DSN; `TestOpenAppliesPragmas` reads all three back |
+| 6 | Full ctx-taking API on domain types | met (unchanged) |
+| 7 | Scope-filtered list, tier ordering, grouped view | met (unchanged) |
+| 8 | Unix-second timestamps, `DoneAt` round-trip | met (unchanged) |
+| 9 | Two handles, interleaved writes and reads | met |
 | 10 | `go test` / `go vet` / `gofmt` clean; no libsqlite3 | met |
 | 11 | `doctor` reports schema 1, exits 0 | met |
 | 12 | Real SQLite files in `t.TempDir()`, no mocks | met |
+| 13 | **Concurrent first open is safe** | met — 0/25 two-process, 0/25 3-way, 0/15 6-way; two new tests that fail against the old build |
