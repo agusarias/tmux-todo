@@ -1,7 +1,7 @@
 # TPM Plugin And Install
 
-**Status:** in-progress
-**Worktree:** ../todo-tpm-plugin-and-install
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 Ship the TPM plugin that makes `tdo` reachable from a stock tmux config: a `tmux-todo.tmux`
@@ -196,6 +196,65 @@ This does mean a plugin regression will not be caught by the command everyone ru
 the trade is deliberate, and the alternative (a tmux dependency in the default test target)
 is worse.
 
+### 2026-08-20 (executor) — five `how` revisions, one clause flagged
+
+All within the plan's drift clause; the Goal, Constraints and DoD were not touched.
+
+5. **The body grep is PATH-SPECIFIC, which is what makes Decision 3's own accepted gap
+   true.** Decision 3 wrote the guard as `show-hooks -g | grep -q 'tdo session-renamed'` and
+   then recorded the accepted gap as "a moved plugin dir can leave one stale hook alongside
+   the new one". Those two halves contradict each other: a path-*blind* grep matches the
+   stale hook from the old path and therefore **skips installing the new one**, leaving only
+   the broken hook — strictly worse than the gap as described. Grepping for the body
+   *including this binary's path* is what produces the recorded behaviour: same path
+   re-run → no duplicate; moved path → one harmless stale hook beside a working one.
+   Implemented that way; the accepted gap stands exactly as written.
+6. **The brace form needs no `source-file` and no nested-quoting gymnastics.** The plan
+   expected this to be "the fiddly part" and named a temp file as the escape hatch. Measured
+   instead: passing the whole `if-shell { … }` block as ONE shell argument to `bind-key`
+   hands tmux's own parser exactly the text it wants, and `list-keys` renders it
+   byte-identically to `source-file`-ing the same snippet. No temp file, so the steady-state
+   path writes nothing to disk. The integration task's handoff note is corrected in
+   CLAUDE.md.
+7. **The two reads are NOT combined into one tmux call, and that is a measurement, not
+   laziness.** `tmux show-option -gqv @x \; show-hooks -g` looked like a free round-trip
+   saving. Probed: `show-option -gqv` on an *unset* option prints **nothing at all**, not
+   even a newline — so with `@todo-key` unset, line 1 of the combined output is
+   `after-bind-key`, the first hook, and would be read as the key. Rejected.
+8. **A path containing a quote is a resolution failure, not a keybind.** tmux's
+   single-quoted strings have no escape character, so such a path cannot be embedded in
+   either command. Rather than install a keybind that breaks when pressed, the script says so
+   and binds nothing — the same reasoning as step 4 of the chain, which is why it is folded
+   into that outcome rather than being a fifth one.
+9. **The step-3 build stamps the version** the same way `make build` does
+   (`git describe --tags --always --dirty`, falling back to `dev`), since `Version` is what
+   the popup's `?` overlay shows. It costs one `git` call on the build path only, which runs
+   at most once, and never on the steady-state path. Confirmed in the end-to-end leg: the
+   plugin-built binary reports `41646a6`.
+
+**Also worth recording:** the script is written for **bash 3.2**, because that is the only
+bash on macOS (`/bin/bash`, 3.2.57) and a plugin cannot assume a newer one. No associative
+arrays, no `${var^^}`.
+
+**FLAGGED FOR CHECKPOINT 2 — DoD 4's "no measurable time" clause is false as written.**
+Not a `blocked`, because it needs a *choice* rather than an answer, and because the
+`tmux-integration-and-rename-hook` precedent — a DoD clause measurement showed to be false,
+completed, recorded, and explicitly left for the curator — was approved as the right handling.
+Measured: the plugin adds **~31ms** (median) to a tmux **server** start, once per server
+start, not per session, window, or popup. That is four tmux round-trips at ~7.5ms each
+(`show-option`, `show-hooks`, `bind-key`, `set-hook`). Everything else in DoD 4 holds: no
+build, no network, nothing written to disk, and the run is completely silent.
+
+The floor is not zero for any plugin that talks to tmux at all. Three ways out, none of them
+the executor's to pick:
+- **accept it and reword the clause** to name the measured number (~31ms/server start), which
+  is what the item's own "Measured, with the number recorded" already implies;
+- **spend complexity to reach ~23ms** by combining the two *writes* into one invocation
+  (`bind-key … \; set-hook …`) — the two reads cannot be combined, see revision 7. This
+  breaks the clean three-function shape the plan approved and does not make the clause true;
+- **~15ms** would need `@todo-key` read by `display-message -p '#{@todo-key}'` instead of
+  `show-option -gqv`, which DoD 5 mandates by name — so it is a DoD change either way.
+
 **SPUN OUT:** release infrastructure — git tags, a CI workflow, and per-platform release
 binaries the plugin can download — is the strictly better distribution story and is now its
 own brief rather than being smuggled in here.
@@ -282,4 +341,325 @@ lives there and only there. Worth stating because "make everything idempotent" w
   test`. The target should skip with a clear message rather than fail when `tmux` is absent.
 
 ## Evidence
-(Added by the executor.)
+
+All output below is real, from the worktree `../todo-tpm-plugin-and-install` on tmux 3.7b,
+go1.26.6, bash 3.2.57, macOS arm64. Every tmux leg runs on a private socket (`tmux -L`) with
+`-f /dev/null`, so the developer's own `~/.tmux.conf` contributed no keybinds or hooks; the
+end-to-end leg redirects `XDG_DATA_HOME` to a temp dir, so the real database was never opened.
+
+### `make test-plugin` — 45 assertions, all four resolution outcomes (DoD 2, 9)
+
+```
+$ make test-plugin
+bash test/plugin_install_test.sh
+plugin script : .../tmux-todo.tmux
+tmux          : /opt/homebrew/bin/tmux (tmux 3.7b)
+bash          : /bin/bash (GNU bash, version 3.2.57(1)-release (arm64-apple-darwin24))
+go            : /opt/homebrew/bin/go (usable for the build case: yes)
+
+== resolve-1-path                        [outcome 1 of 4]
+    ok   one popup keybind on t
+    ok   and it is the only binding on t
+    ok   keybind points at the PATH binary
+    ok   one tdo session-renamed hook
+    ok   hook points at the PATH binary
+== resolve-2-plugin-bin                  [outcome 2 of 4]
+    ok   one popup keybind on t
+    ok   keybind points at the plugin binary
+    ok   one tdo session-renamed hook
+== resolve-2-plugin-bin-not-executable
+    ok   NO popup keybind on t
+== resolve-path-beats-plugin-bin
+    ok   PATH wins over plugin bin
+    ok   plugin bin not used
+== resolve-3-go-build                    [outcome 3 of 4]
+    ok   precondition: no binary before the run
+    ok   go build produced an executable bin/tdo
+    ok   one popup keybind on t
+    ok   keybind points at the built binary
+    ok   one tdo session-renamed hook
+    ok   the built binary runs (--version exits 0)
+    ok   a second run does not rebuild
+== resolve-4-nothing                     [outcome 4 of 4]
+    ok   NO popup keybind installed
+    ok   no hook installed
+    ok   a display-message was issued
+    ok   the message names the plugin
+    ok   the diagnostic names the binary
+== resolve-4-go-too-old
+    ok   NO popup keybind installed
+    ok   no build attempted
+    ok   the diagnostic names the required version
+== resolve-4-go-unparseable
+    ok   NO popup keybind installed
+    ok   no build attempted
+== resolve-4-go-build-fails
+    ok   NO popup keybind installed
+    ok   the diagnostic names the binary
+== key-default
+    ok   defaults to t when @todo-key is unset
+== key-empty-option
+    ok   defaults to t when @todo-key is empty
+== key-override
+    ok   binds w when @todo-key is w
+    ok   and installs no popup binding on t
+    ok   the override still opens the popup
+[idempotence and steady-state cases below]
+----------------------------------------
+plugin harness: 45 passed, 0 failed
+```
+
+Note `resolve-4-go-build-fails`: a `go` new enough to pass the version gate whose *build*
+produces nothing. The script's post-build check is `[ -x bin/tdo ]`, not `did go build exit
+0`, because the binary existing is the condition the keybind actually depends on.
+
+### Idempotence, as real output rather than an assertion (DoD 7)
+
+Three consecutive runs, printing the greps after each — this is the harness's own output:
+
+```
+== idempotence-three-runs
+    -- after run 1
+       show-hooks -g, tdo hooks   : 1  session-renamed[0] run-shell -b ".../path/tdo session-renamed"
+       list-keys -T prefix, key t : 1 popup binding(s), 1 binding(s) total
+    -- after run 2
+       show-hooks -g, tdo hooks   : 1  session-renamed[0] run-shell -b ".../path/tdo session-renamed"
+       list-keys -T prefix, key t : 1 popup binding(s), 1 binding(s) total
+    -- after run 3
+       show-hooks -g, tdo hooks   : 1  session-renamed[0] run-shell -b ".../path/tdo session-renamed"
+       list-keys -T prefix, key t : 1 popup binding(s), 1 binding(s) total
+    ok   exactly one tdo hook after three runs
+    ok   exactly one popup keybind on t after three runs
+    ok   and t carries no second binding
+```
+
+And a user's own hooks, after three runs of the install (DoD 8):
+
+```
+== user-hook-survives
+    -- show-hooks -g after three runs:
+       session-renamed[0] display-message "user hook still here"
+       session-renamed[1] run-shell "touch .../canary"
+       session-renamed[2] run-shell -b ".../path/tdo session-renamed"
+    ok   the user's display-message hook survives
+    ok   the user's run-shell hook survives
+    ok   exactly one tdo hook alongside them
+    ok   the user's hook still FIRES after the install
+```
+
+The firing is a real `rename-session` on a real server, observed through a `run-shell touch`
+canary — `display-message` cannot be observed on a server with no attached client, which is
+also why the step-4 message is asserted through tmux's command log.
+
+### The guard is load-bearing: two mutations (DoD 7's verification)
+
+Idempotence tests pass trivially against a script that installs nothing, so the guard was
+re-run against mutated copies of the real script (`PLUGIN_SCRIPT=<mutant> make test-plugin`):
+
+| mutation | result |
+|---|---|
+| the body-grep guard **deleted** | hooks stack `[0] [1] [2]` — `1`, `2`, `3` after runs 1/2/3; **2 assertions fail** |
+| the guard greps the hook's **name** instead of its body | the hook is **never installed at all** — 0 hooks on every run; **6 assertions fail** |
+| (the real script) | 45 passed, 0 failed |
+
+The second mutation is the one worth keeping: it is Finding 3's trap in code. `show-hooks -g`
+prints a bare `session-renamed` line even when zero hooks are installed, so a name grep
+matches on a *fresh* server and the install is silently skipped — the failure direction that
+leaves the rename broken with no error anywhere. The body grep is what discriminates, in both
+directions.
+
+**The harness was also shown able to fail before it was trusted.** Written against a
+do-nothing stub script first, per the plan's step 2, which caught two bugs that would have
+made the entire suite vacuous:
+
+- `env -i PATH=<stubs only>` left no `bash` on the sandbox PATH, so **the script never ran at
+  all** and 22 assertions were "failing" for the wrong reason;
+- and no `grep`, so the hook guard silently never executed;
+- worse, tmux's **default** prefix table already binds `t` (clock-mode) and `w`
+  (choose-tree), so counting bindings for a key counted tmux's own and passed with the plugin
+  deleted. Every key assertion now counts bindings whose *command* is the plugin's
+  (`display-popup`), plus a total-for-the-key check so a second binding is still caught.
+
+The sandbox now carries the system tool dirs and sandboxes only `tdo` and `go` — and asserts
+at startup that neither is reachable in `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, so the suite
+fails loudly instead of degrading if `tdo` gets installed system-wide later.
+
+### Outcome 4 demonstrated: no binary, no `go`, no keybind (DoD 3)
+
+```
+$ env -i HOME=$HOME PATH=<tmux shim>:/usr/bin:/bin ./tmux-todo.tmux
+tmux-todo: no usable tdo binary (no 'go' on $PATH to build it with). Install tdo on $PATH,
+or run 'make build' in /…/msg/plugin. No keybind installed.
+
+$ tmux -L tdomsg list-keys -T prefix | awk '$4=="t"'
+bind-key    -T prefix t       clock-mode
+```
+
+`t` still carries tmux's own `clock-mode` — the plugin bound nothing rather than binding
+something that would fail on press.
+
+### The Go floor sweep (DoD 10, 13)
+
+```
+$ sed -i '' 's/^go 1.26$/go 1.25.0/' go.mod && go mod tidy
+$ git diff go.mod
+-go 1.26
++go 1.25.0
+$ git diff --stat go.sum
+                              # empty: byte-identical
+$ make test
+ok  github.com/agusarias/tmux-todo/internal/cli     0.910s
+ok  github.com/agusarias/tmux-todo/internal/scope   0.935s
+ok  github.com/agusarias/tmux-todo/internal/store   1.065s
+ok  github.com/agusarias/tmux-todo/internal/task    1.116s
+ok  github.com/agusarias/tmux-todo/internal/tui     6.073s
+$ make lint                   # go vet ./... + gofmt -l .
+(clean)
+$ gofmt -l .
+(empty)
+$ CGO_ENABLED=0 make build && otool -L bin/tdo
+bin/tdo:
+    /usr/lib/libSystem.B.dylib
+    /usr/lib/libresolv.9.dylib     # no libsqlite3
+```
+
+`go mod tidy` normalised `1.25` to `1.25.0` by itself, as the curator's probe predicted. The
+curator's verification reproduced exactly; this item was confirmation, not discovery.
+
+### DoD 4 — the steady-state measurement, and the clause that does not hold
+
+No build, no network, nothing written to disk, and the run is silent (asserted:
+`the steady-state run is silent` compares the script's whole stdout+stderr to `""`). The
+`steady-state-no-build` case masks `go` from `PATH` entirely, so no build *can* have happened.
+
+The timing, measured the way the DoD asks — a tmux **server** start with and without the
+plugin in the config, 25 runs each:
+
+```
+without plugin  n=25 median=  14.4ms  p90=  19.0ms  min=  13.6ms
+with plugin     n=25 median=  45.1ms  p90=  51.1ms  min=  39.2ms
+```
+
+**~31ms added, once per tmux server start** — not per session, window, keypress or popup.
+That is four tmux round-trips at ~7.5ms each. So "adds no measurable time to tmux startup"
+is **false as written**, and it is flagged for Checkpoint 2 rather than quietly satisfied or
+quietly dropped; the three ways out, and why none is the executor's to pick, are in the
+Decisions log above. Everything else in DoD 4 holds.
+
+### The whole product, from a config, on a real server (the manual end-to-end leg)
+
+A TPM-style `git clone` of this branch into a plugins dir, a config holding exactly what a
+user writes, and a server started with it. The clone has no `bin/tdo` (it is gitignored), so
+this exercises **outcome 3 in its realistic setting**:
+
+```
+### 1. TPM-style clone
+    mode: -rwxr-xr-x   tmux-todo.tmux          # the exec bit survived the clone
+    bin/tdo present in the clone? no - so the plugin must build it
+
+### 2. the config
+    set -g @todo-key 't'
+    run-shell '/…/e2e/plugins/tmux-todo/tmux-todo.tmux'
+
+### 3. what the plugin did, from a cold clone
+    binary the plugin built:
+       -rwxr-xr-x 7814338 bytes  bin/tdo
+      version stamp: 41646a6
+      static? /usr/lib/libSystem.B.dylib /usr/lib/libresolv.9.dylib
+    keybind:
+      bind-key -T prefix t  if-shell -F "#{m:-*,#{e|-|:#{client_width},100}}" { … }
+    hook:
+      session-renamed[0] run-shell -b "/…/bin/tdo session-renamed"
+
+### 4. tasks seeded from inside the session, so session scope resolves
+      1|session:work|rebase onto main
+      2|global:|call the dentist
+```
+
+`prefix + t`, pressed for real (`send-keys -t outer C-b t`) against a manufactured 80x24
+attached client, captured with `capture-pane`:
+
+```
+         ┌──────────────────────────────────────────────────────────┐
+         │╭────────────────────────────────────────────────────────╮│
+         ││  tdo                                                   ││
+         ││                                                        ││
+         ││  ▸ ⌘ rebase onto main                 (session: work)  ││
+         ││    ◉ call the dentist                 (global)         ││
+         ││                                                        ││
+         ││                                                        ││
+         ││                                                        ││
+         ││                                                        ││
+         ││                                                        ││
+         ││                                                        ││
+         ││  j/k move · space done · ? keys · q quit               ││
+         │╰────────────────────────────────────────────────────────╯│
+         └──────────────────────────────────────────────────────────┘
+```
+
+The 60 x 15 floor, honoured through the plugin's own keybind: an 80x24 client, so both
+`if-shell` branches take the floored leg and the TUI gets 58 columns. `j` then `space` moved
+the cursor and completed a row, and the store agreed
+(`select id, text, done where done=1` -> `2|call the dentist|1`); `q` closed it.
+
+The rename hook, fired by a real rename:
+
+```
+### 7. the rename hook
+    before: global: | session:work
+    session map: $0 -> work
+    == tmux rename-session -t work renamed ==
+    after : global: | session:renamed
+    session map: $0 -> renamed
+```
+
+And three more `run-shell`s of the script against that same live server — the shape a
+tmux restart takes:
+
+```
+    tdo hooks after three more runs : 1
+    bindings on t                   : 1
+    user data intact                : 2 tasks
+```
+
+### Definition of done
+
+1. ✅ `tmux-todo.tmux` at the repo root, `#!/usr/bin/env bash` + `set -u`, committed
+   **mode 100755** (`git ls-files -s` -> `100755 … tmux-todo.tmux`), and the exec bit
+   verified to survive a real `git clone` in the end-to-end leg.
+2. ✅ the four-step chain, each outcome exercised by the harness, plus three extra
+   failure paths (`go` too old, unparseable `go version`, a build that produces nothing) and
+   the ordering case that proves `$PATH` beats a stale plugin-local build.
+3. ✅ `resolve-4-*` cases assert **no** binding; demonstrated above with `t` still on
+   tmux's `clock-mode`.
+4. ⚠️ no build, no network, nothing written, silent — all proven. "**No measurable time**"
+   is **false**: ~31ms per tmux server start, measured against a baseline. Recorded, and
+   flagged above for a curator ruling.
+5. ✅ read via `tmux show-option -gqv @todo-key`; defaults to `t` when unset **and** when
+   set to empty; prefix table; override tested, including that it leaves no popup binding
+   on `t`.
+6. ✅ `@todo-key` is the only option in the script (`grep -c '@todo-' tmux-todo.tmux` -> 1
+   occurrence, in `install_keybind`). Geometry unchanged from the signed-off branch.
+7. ✅ three runs -> exactly one hook, exactly one binding, shown as output, and proven
+   load-bearing by two mutations.
+8. ✅ a `display-message` user hook and a `run-shell` user hook both survive three runs,
+   and the run-shell one still fires on a real rename.
+9. ✅ `test/plugin_install_test.sh`, private `tmux -L` server per case, assertions on
+   `list-keys` / `show-hooks`, run by `make test-plugin`. `make test` is untouched and needs
+   no tmux; the harness skips with a message when tmux is absent.
+10. ✅ `go 1.25.0` via `go mod tidy`, `go.sum` byte-identical, suite + vet + gofmt + static
+    build all clean.
+11. ✅ README rewritten: what it is, TPM install, manual install, `@todo-key`, the popup's
+    keys (taken from `helpLines` in the code, not from the design mock), sesh as an optional
+    enhancement, **Go 1.25** as the build floor, and where the data lives including the WAL
+    sidecars. The "Status: scaffold" claim and the impossible "Go 1.23" requirement are gone.
+12. ✅ `design.md`'s Distribution section records the four-step chain, why it ends in a
+    source build, the every-server-start constraint, the `bind-key`-replaces /
+    `set-hook -ga`-appends asymmetry, and the measured cost.
+13. ✅ `make test`, `make test-plugin`, `make lint` clean; `gofmt -l .` empty;
+    `CGO_ENABLED=0 make build` links only `libSystem` and `libresolv`.
+
+**Merged into local `main` as @@MERGE@@** (implementation commit `41646a6`, docs and
+evidence in `@@DOCS@@`). The worktree `../todo-tpm-plugin-and-install` has been removed, so
+read the diff with `git show 41646a6` or `git log -1 -p @@MERGE@@`. **Not pushed.**
+
