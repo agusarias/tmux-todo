@@ -1,7 +1,7 @@
 # Make The Tmux Regression Guard CI-Proof
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-tmux-regression-guard
 
 ## Goal
 `internal/scope`'s regression tests must fail against the tmux-blindness bug on a machine
