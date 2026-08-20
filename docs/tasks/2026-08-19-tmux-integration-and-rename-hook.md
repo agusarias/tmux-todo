@@ -1,7 +1,7 @@
 # Tmux Integration And Rename Hook
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-tmux-integration
 
 ## Goal
 Wire `tdo` into tmux so the popup is reachable and session-scoped tasks survive a session
