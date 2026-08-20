@@ -143,6 +143,28 @@ fi
 # turns that 404 into a failure instead of a 9-byte HTML page installed as
 # bin/tdo. wget also refuses file:// URLs outright, so the wget leg needs it.
 PY3=$(command -v python3 || true)
+
+# Can `show-messages` observe a display-message on a server with no attached
+# client? On tmux 3.7b it can; on 3.4 — ubuntu-latest's apt tmux, and the first
+# CI run that surfaced this — it cannot, so three assertions that read the
+# message log are simply unanswerable there.
+#
+# This is a capability of the observation mechanism, not of the plugin. The
+# *content* of every one of those diagnostics is already asserted against the
+# script's own stderr, which is version-independent; what the message-log
+# assertions add on top is that the tmux channel fired at all. So detect, and
+# skip loudly where it cannot be seen, rather than dropping the assertions
+# everywhere or failing on a tmux that cannot answer the question.
+CAN_SEE_MSGS=''
+_msgsock="tdo-msgprobe-$$"
+if tmux -L "$_msgsock" new-session -d -s probe 2>/dev/null; then
+    tmux -L "$_msgsock" display-message 'tdo-msgprobe-canary' 2>/dev/null
+    case $(tmux -L "$_msgsock" show-messages 2>/dev/null) in
+        *tdo-msgprobe-canary*) CAN_SEE_MSGS=yes ;;
+    esac
+    tmux -L "$_msgsock" kill-server 2>/dev/null
+fi
+unset _msgsock
 FIXTURE_PIDS=()
 
 SOCKETS=()
@@ -169,6 +191,11 @@ echo "host asset    : ${HOST_ASSET:-<unmapped platform>}"
 echo "sha256 tool   : ${SHA_TOOL:-none}"
 echo "downloader    : curl=$(command -v curl || echo none) wget=$(command -v wget || echo none)"
 echo "fixture server: ${PY3:-none (fixtures fall back to file://)}"
+if [ -n "$CAN_SEE_MSGS" ]; then
+    echo "show-messages : observable"
+else
+    echo "show-messages : NOT observable on this tmux; message-log assertions skip"
+fi
 
 # ---------------------------------------------------------------- assertions
 
@@ -447,9 +474,13 @@ case_start resolve-4-nothing
 out=$(plugin_run)
 assert_eq 0 "$(count_plugin_keybinds_for t)" "NO popup keybind installed"
 assert_eq 0 "$(count_tdo_hooks)" "no hook installed"
-msgs=$(tm show-messages 2>/dev/null)
-assert_contains "$msgs" "display-message" "a display-message was issued"
-assert_contains "$msgs" "tmux-todo" "the message names the plugin"
+if [ -n "$CAN_SEE_MSGS" ]; then
+    msgs=$(tm show-messages 2>/dev/null)
+    assert_contains "$msgs" "display-message" "a display-message was issued"
+    assert_contains "$msgs" "tmux-todo" "the message names the plugin"
+else
+    printf '    SKIP show-messages cannot observe a display-message on this tmux\n'
+fi
 assert_contains "$out" "tdo" "the diagnostic names the binary"
 case_end
 
@@ -549,7 +580,11 @@ out=$(plugin_run)
 assert_exec "$PLUGINDIR/bin/tdo" "best-effort: the download is used anyway"
 assert_eq 1 "$(count_plugin_keybinds_for t)" "and the keybind is installed"
 assert_contains "$out" "UNVERIFIED" "the diagnostic says it is unverified"
-assert_contains "$(tm show-messages 2>/dev/null)" "UNVERIFIED" "and the user is told via display-message"
+if [ -n "$CAN_SEE_MSGS" ]; then
+    assert_contains "$(tm show-messages 2>/dev/null)" "UNVERIFIED" "and the user is told via display-message"
+else
+    printf '    SKIP show-messages cannot observe a display-message on this tmux\n'
+fi
 case_end
 
 # Best-effort verification, case 2: a checksums.txt that simply has no line for
