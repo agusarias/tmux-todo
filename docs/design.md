@@ -77,7 +77,9 @@ j/k move · space done · ? keys · q quit
 
 **The footer is a pointer, not a keymap.** An earlier version of this mock listed every key
 — 83 columns, and 93 once `j/k` and the version stamp were added — inside a popup whose own
-geometry above gives the content 42. The list would have been silently truncated from the
+geometry above gives the content 52 at the 60 x 15 floor (and 42 before that floor was
+adopted; both were measured, and the keymap overruns either). The list would have been
+silently truncated from the
 right, hiding the keys at the end. `?` opens a keymap overlay instead: it replaces the list
 body, so it costs no chrome row, and it is where the version lives too.
 
@@ -124,19 +126,65 @@ body, so it costs no chrome row, and it is where the version lives too.
 currently active.
 
 ```
-─ SESSION pulsar ─ (live)
-  [ ] rebase onto main        ↵ switch there
-─ SESSION api ─ (not running)
-  [ ] fix flaky test          ↵ sesh connect api
+─ SESSION api ─ (not running)          ↵ sesh
+  fix flaky test
+─ SESSION pulsar ─ (live)              ↵ switch
+▸ rebase onto main
+  check CI
 ─ DIR ~/ws/sesh ─
-  [ ] update README
+  update README
 ─ GLOBAL ─
-  [ ] call the dentist
+  call the dentist
 ```
 
-- `Enter` on a session-scoped task **switches to that session** (`tmux switch-client` if
-  live, `sesh connect` otherwise) and closes the popup.
-- Non-running session groups are labelled as such and support re-home (`r`) and delete.
+Groups run in tier order and, inside a tier, in scope-key order — so `api` precedes
+`pulsar` and a stranded key is never buried at the bottom. Newest-first applies *within* a
+group. Rows carry no scope glyph and no tier label, because the header above them already
+says the scope; that is the whole meaning of "wide" here. The frame's dimensions do not
+change — `display-popup` cannot resize once open.
+
+**The jump affordance lives on the group header, once.** An earlier version of this mock put
+`↵ switch there` on every row: 14 columns, and `↵ sesh connect <name>` is 18–35, against a
+minimum content width of 52 — a quarter to two thirds of every session row, repeated to say
+something identical for every row in the group. The header already carries the scope and the
+liveness label, so it is where "what Enter does" belongs, and the task text keeps the full
+width. The hint is right-aligned and wins its columns: the session *name* left-truncates
+instead, because a name's tail is what identifies it.
+
+- Group headers are **not selectable**. `j`/`k` steps between task rows and skips them, so
+  every action still acts on a task.
+- `Enter` on a session-scoped task **switches to that session** and closes the popup — the
+  only action allowed to close it. Live: `tmux switch-client`. Not running:
+  **`sesh connect -s`** (the `--switch` flag, *not* bare `connect`: inside a popup the client
+  is always already attached, and `connect` would attach a second one), falling back to
+  `tmux new-session -d` + `switch-client` when `sesh` is absent **or does not know the name**
+  — `sesh list` blends live sessions, zoxide directories and config entries, while a stranded
+  tdo scope key is a *dead tmux session name* that need not appear in any of them. So `sesh`
+  is an optional enhancement that restores the session's directory and startup command when
+  it can, and never a dependency. From outside tmux the verb is `attach` rather than
+  `switch-client`, which needs a client.
+- `Enter` on a dir or global row does nothing: there is nothing to switch to.
+- Non-running session groups are labelled as such, and every session group supports re-home
+  (`r`) and group delete (`D`).
+- **`r` cycles the whole group through the currently *active* scopes** — the same
+  availability cycle `Tab` and `s` walk — and applies it as a bulk re-scope. Re-home exists
+  to make stranded tasks visible again, and "visible again" means a scope you are actually
+  in; cycling through every dir key in the database would be a long unordered list of places
+  the tasks would still be invisible. Three presses therefore reach the session you are in,
+  which is the motivating case. It is bulk and it is *not* covered by the delete queue's
+  undo: re-homing again is the only way back. No row is lost either way.
+- **`D` deletes the whole group** through the same queue `d` uses, so one `u` restores every
+  row with its id, timestamp and position intact and nothing reaches the database until the
+  popup closes. The queue's undo unit is one *keypress*, not one row. A group whose every row
+  is queued disappears entirely, header included.
+- `a` files into the group under the cursor, and `Tab` is inert there — the group *is* the
+  scope choice. That target may be a session that is not running, which is legitimate:
+  queueing work for a session you are about to recreate is arguably the point of this view.
+  It does not move the sticky default, because it is a placement rather than a preference.
+- **Liveness is resolved once, before the popup opens**, and injected. A subprocess on a
+  keypress inside the popup would put ~5ms and a failure mode on the hot path. The staleness
+  is cheap: a session killed while the popup is open still reads `(live)`, and `Enter` then
+  falls through to the create-and-switch path anyway, so a wrong label costs nothing.
 
 ## CLI surface
 

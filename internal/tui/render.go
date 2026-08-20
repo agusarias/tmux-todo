@@ -297,6 +297,156 @@ func renderRow(t task.Task, label string, selected bool, cols layout) string {
 	return b.String()
 }
 
+// Group header decoration for the all-tasks view, per docs/design.md's mock:
+// "─ SESSION pulsar ─ (live)".
+const (
+	headerRule = "─"
+	// headerGap separates a header's text from its right-aligned jump hint.
+	headerGap = "  "
+	// minHeaderText is the narrowest header text worth keeping. Below it the
+	// jump hint is dropped instead of the scope: a header with no scope in it
+	// names nothing, and the hint only says what Enter would do to it.
+	minHeaderText = 12
+)
+
+// Jump hints. They live in the header, once per group, rather than on every row.
+//
+// Measured against the minimum contentWidth of 52 (docs/design.md's 60x15 floor
+// leaves a 58-wide pane, less chromeWidth): the design's per-row
+// "↵ switch there" is 14 columns and "↵ sesh connect <name>" is 18-35, i.e. 26%
+// to 67% of every session row, repeated to say something identical for every row
+// in the group. The header already carries the scope and the liveness label, so
+// it is where "what Enter does" belongs, and the rows keep their full width for
+// task text.
+const (
+	hintSwitch = "↵ switch"
+	hintSesh   = "↵ sesh"
+)
+
+// Liveness labels. A session group with tasks that is not in Config.LiveSessions
+// is "(not running)" — including the case where nothing is known to be running
+// at all, which is what "absent beats empty" means here.
+const (
+	labelLive       = "(live)"
+	labelNotRunning = "(not running)"
+)
+
+// renderGroupRows formats the all-tasks view: a header per scope, then its
+// tasks at full width.
+//
+// Rows carry no glyph and no tier label, because the header above them carries
+// the scope — that is the entire meaning of "wide" in docs/design.md. The frame
+// itself does not change: display-popup cannot resize once open.
+func renderGroupRows(rows []listRow, opts renderOpts) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	// The cursor mark is the rows' whole indent, which is what puts them under
+	// their header the way the design's mock shows.
+	textWidth := opts.Width - lipgloss.Width(cursorPad)
+	if textWidth < 1 {
+		textWidth = 1
+	}
+
+	out := make([]string, 0, len(rows))
+	for i, r := range rows {
+		if r.kind == rowHeader {
+			out = append(out, renderHeader(r, opts.Home, opts.Width))
+			continue
+		}
+		out = append(out, renderWideRow(r.task, i == opts.Cursor, textWidth))
+	}
+	return out
+}
+
+// renderWideRow is a task row with no scope column: cursor, text.
+func renderWideRow(t task.Task, selected bool, width int) string {
+	var b strings.Builder
+	if selected {
+		b.WriteString(cursorMark)
+	} else {
+		b.WriteString(cursorPad)
+	}
+	b.WriteString(textStyle(t, selected).Render(truncate(t.Text, width)))
+	return b.String()
+}
+
+// renderHeader formats one group header, with the jump hint right-aligned.
+//
+// The hint wins its columns and the scope *key* left-truncates, which is the
+// same rule columns() applies to tier labels and for the same reason: a row
+// wider than the viewport is silently clipped, not wrapped, so a header sized
+// from "whatever is left" renders no hint at all for a long session name. The
+// key truncates from the left because its tail is what identifies it.
+func renderHeader(r listRow, home string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	hint := headerHint(r)
+	textRoom := width
+	if hint != "" {
+		room := width - lipgloss.Width(hint) - lipgloss.Width(headerGap)
+		if room >= minHeaderText {
+			textRoom = room
+		} else {
+			hint = ""
+		}
+	}
+
+	text := headerText(r, home, textRoom)
+	if hint == "" {
+		return labelStyle.Render(text)
+	}
+	// Padding measured on the plain text and written outside the styled spans:
+	// styling first would have the ANSI escapes count towards the width.
+	pad := textRoom - lipgloss.Width(text)
+	if pad < 0 {
+		pad = 0
+	}
+	return labelStyle.Render(text) + strings.Repeat(" ", pad) + headerGap + hintStyle.Render(hint)
+}
+
+// headerHint is what Enter would do to this group, or "" where Enter does
+// nothing: a dir or global group is not a place you can switch to.
+func headerHint(r listRow) string {
+	if r.group.Scope.Kind != task.ScopeSession {
+		return ""
+	}
+	if r.live {
+		return hintSwitch
+	}
+	return hintSesh
+}
+
+// headerText is the header's left side: the rule, the tier, the key, and the
+// liveness label for a session.
+func headerText(r listRow, home string, room int) string {
+	s := r.group.Scope
+	tier := strings.ToUpper(string(s.Kind))
+	var live string
+	if s.Kind == task.ScopeSession {
+		live = " " + labelNotRunning
+		if r.live {
+			live = " " + labelLive
+		}
+	}
+	key := s.Key
+	if s.Kind == task.ScopeDir {
+		key = abbreviateHome(key, home)
+	}
+
+	// Without the key: "─ GLOBAL ─", and the fallback when the key has no room.
+	bare := headerRule + " " + tier + " " + headerRule + live
+	if key == "" {
+		return truncate(bare, room)
+	}
+	keyRoom := room - lipgloss.Width(bare) - 1
+	if keyRoom < 1 {
+		return truncate(bare, room)
+	}
+	return truncate(headerRule+" "+tier+" "+truncateLeft(key, keyRoom)+" "+headerRule+live, room)
+}
+
 // helpLines is the keymap overlay's content: every key this build binds, plus
 // the running version.
 //
@@ -310,14 +460,28 @@ func renderRow(t task.Task, label string, selected bool, cols layout) string {
 //
 // A pure function of the version so its width is directly assertable, in the
 // same spirit as the rest of this file.
-func helpLines(version string) []string {
+func helpLines(view viewKind, version string) []string {
+	// Per view, so the overlay describes the list you are actually looking at.
+	// The keys are the same set; what differs is that Enter, r and D only mean
+	// something where there are groups, and Tab only means something where the
+	// scope has not already been chosen by one.
 	lines := []string{
 		"j/k move · space done · q quit",
 		"a add · e edit · s re-scope",
 		"d delete · u undo (until close)",
-		"1/2/3 filter tier · tab scope (add)",
-		"? or esc closes this",
 	}
+	if view == viewAll {
+		lines = append(lines,
+			"enter jump · r re-home · D del group",
+			"1/2/3 filter tier · g merged view",
+		)
+	} else {
+		lines = append(lines,
+			"1/2/3 filter tier · tab scope (add)",
+			"g all tasks (every scope)",
+		)
+	}
+	lines = append(lines, "? or esc closes this")
 	if version != "" {
 		lines = append(lines, "v"+version)
 	}

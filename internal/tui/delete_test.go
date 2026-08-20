@@ -67,7 +67,7 @@ func TestDeleteQueuesWithoutWriting(t *testing.T) {
 	if indexOf(m.tasks, keep.ID) < 0 {
 		t.Errorf("d took the wrong row: %v", texts(m.tasks))
 	}
-	if got := m.queued; len(got) != 1 || got[0] != doomed.ID {
+	if got := m.queued; len(got) != 1 || len(got[0]) != 1 || got[0][0] != doomed.ID {
 		t.Errorf("queue = %v, want just the deleted id", got)
 	}
 
@@ -143,7 +143,7 @@ func TestUndoIsLastInFirstOut(t *testing.T) {
 	second := m.tasks[0].ID
 	m = pressAndSettle(t, m, "d")
 
-	if got := m.queued; len(got) != 2 || got[0] != first || got[1] != second {
+	if got := m.queued; len(got) != 2 || got[0][0] != first || got[1][0] != second {
 		t.Fatalf("queue = %v, want [%d %d]", got, first, second)
 	}
 	m = pressAndSettle(t, m, "u")
@@ -384,7 +384,7 @@ func TestDeleteOnAnEmptyListIsInert(t *testing.T) {
 // dropQueued is the single filter point; this pins it directly so a refactor
 // that moves the call has to keep the behaviour.
 func TestDropQueuedFiltersByID(t *testing.T) {
-	m := Model{queued: []int64{2, 4}}
+	m := Model{queued: [][]int64{{2}, {4}}}
 	in := []task.Task{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 5}}
 	if got := ids(m.dropQueued(in)); len(got) != 3 || got[0] != 1 || got[1] != 3 || got[2] != 5 {
 		t.Errorf("dropQueued = %v, want [1 3 5]", got)
@@ -412,7 +412,7 @@ func TestRunReturnsTheCommitError(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	err := run(m,
+	_, err := run(m,
 		tea.WithInput(strings.NewReader("q")),
 		tea.WithoutRenderer(),
 		tea.WithoutSignalHandler(),
@@ -435,7 +435,7 @@ func TestRunReturnsNilOnACleanExit(t *testing.T) {
 	m.cursor = indexOf(m.tasks, doomed.ID)
 	m = pressAndSettle(t, m, "d")
 
-	if err := run(m,
+	if _, err := run(m,
 		tea.WithInput(strings.NewReader("q")),
 		tea.WithoutRenderer(),
 		tea.WithoutSignalHandler(),

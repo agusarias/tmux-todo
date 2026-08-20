@@ -32,10 +32,11 @@ type deletesCommittedMsg struct{ err error }
 // queueDelete removes the cursor row from the view and remembers it. No DELETE
 // is issued here.
 func (m Model) queueDelete() (tea.Model, tea.Cmd) {
-	if m.cursor < 0 || m.cursor >= len(m.tasks) {
+	target, ok := m.selectedTask()
+	if !ok {
 		return m, nil
 	}
-	m.queued = append(m.queued, m.tasks[m.cursor].ID)
+	m.queued = append(m.queued, []int64{target.ID})
 	// Reload rather than splice the row out locally: the store stays the single
 	// source of truth for what is on screen, and dropQueued is applied there.
 	return m, m.reloadCmd()
@@ -43,6 +44,10 @@ func (m Model) queueDelete() (tea.Model, tea.Cmd) {
 
 // undoDelete pops the most recent queued delete and puts the cursor back on the
 // row that returns. LIFO, so repeated `u` unwinds repeated `d` in order.
+//
+// One `u` undoes one keypress, which for a group delete means the whole group
+// comes back at once — with every id, timestamp and position intact, since
+// nothing was written. The cursor lands on the first of the restored rows.
 func (m Model) undoDelete() (tea.Model, tea.Cmd) {
 	if len(m.queued) == 0 {
 		return m, nil
@@ -50,7 +55,28 @@ func (m Model) undoDelete() (tea.Model, tea.Cmd) {
 	last := len(m.queued) - 1
 	restored := m.queued[last]
 	m.queued = m.queued[:last]
-	return m, m.reloadAnchoredTo(restored)
+	if len(restored) == 0 {
+		return m, m.reloadCmd()
+	}
+	return m, m.reloadAnchoredTo(restored[0])
+}
+
+// queuedIDs flattens the undo stack into the ids it is hiding. Three callers
+// want the ids and none of them wants the steps: the view filter, the commit,
+// and the empty-state count.
+func (m Model) queuedIDs() []int64 {
+	var n int
+	for _, step := range m.queued {
+		n += len(step)
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]int64, 0, n)
+	for _, step := range m.queued {
+		out = append(out, step...)
+	}
+	return out
 }
 
 // dropQueued removes queued rows from a freshly loaded set.
@@ -59,11 +85,12 @@ func (m Model) undoDelete() (tea.Model, tea.Cmd) {
 // queued task cannot be reached by the cursor or acted on by space/e/s, and does
 // not come back when another pane's insert triggers a re-query.
 func (m Model) dropQueued(tasks []task.Task) []task.Task {
-	if len(m.queued) == 0 || len(tasks) == 0 {
+	ids := m.queuedIDs()
+	if len(ids) == 0 || len(tasks) == 0 {
 		return tasks
 	}
-	queued := make(map[int64]struct{}, len(m.queued))
-	for _, id := range m.queued {
+	queued := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
 		queued[id] = struct{}{}
 	}
 	out := make([]task.Task, 0, len(tasks))
@@ -84,7 +111,7 @@ func (m Model) dropQueued(tasks []task.Task) []task.Task {
 // others alive.
 func (m Model) commitDeletesCmd() tea.Cmd {
 	db := m.cfg.DB
-	ids := append([]int64(nil), m.queued...)
+	ids := m.queuedIDs()
 
 	return func() tea.Msg {
 		if db == nil || len(ids) == 0 {

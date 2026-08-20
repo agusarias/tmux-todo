@@ -1,6 +1,6 @@
 # Tmux Integration And Rename Hook
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged and removed)
 
 ## Goal
@@ -568,3 +568,74 @@ above needs `source-file` (or careful nested quoting) to install from a shell.
     (the `run-shell` interpolation trap, `set-hook -a`, the `display-popup` size traps, and
     the nested-client capture technique that corrects its own earlier claim); `docs/design.md`
     records the size floor and the v2 table.
+
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `683348c` stays on local `main`; no revert, no fix-forward. `main` is
+**unpushed** — pushing remains the user's call.
+
+**DoD 10's open item is resolved as moot, not deferred.** The executor was right not to pick
+between raising the popup floor to 78, shortening the footer, or dropping the clause — all
+three were the curator's call. It then resolved itself: `task-create-edit-rescope` (merged
+`dc5e73c`, approved at the same checkpoint) moved `Version` out of the footer entirely, and
+`footerText` is now a version-free 39 columns against the 52 the 60 x 15 floor leaves. So the
+floor stands as signed off, `design.md` needs no amendment, and the clause is satisfied for
+every build stamp rather than only for `dev`. Verified on `main`, not inferred.
+
+**Independently re-verified by the curator on current `main`:** full suite green across all
+five packages, `go vet` silent, `gofmt -l .` empty, `migrations/` holds `001_init.sql` and
+`002_sessions.sql`, and `tdo doctor` reports schema 2.
+
+**The two findings worth carrying forward.**
+
+1. **The plan's hook mechanism was wrong, and only measurement caught it.** The approved plan
+   passed the session name to the hook as an argument. Measured against real names, that form
+   fails on `a'b` — which is not a cosmetic failure but *the injection* — and on `a:b`, which
+   cannot be a tmux target at all. The executor changed the mechanism to an argument-free
+   hook (the child inherits `$TMUX`, whose session field is the one the hook fired for) and
+   proved it with an injection canary across ten adversarial names including
+   `x'; touch …/pwned; '`. Canary absent. This is the plan's drift clause working exactly as
+   intended: a `how` revised under measurement, with the old form's failure recorded rather
+   than quietly dropped.
+2. **`TestSessionRenamedWhenItIsTheCurrentSession` is the guard that discriminates.** When
+   the hook fires, the renamed session *is* the one the process runs in — so refreshing the
+   map before reading it, which is what `openEnv` does for every other command, records
+   `$id -> new` first, finds the new name, concludes there is nothing to move, and orphans
+   the tasks. **Every other test in the file passes under that mutation.** The `openStore`
+   /`openEnv` split is therefore load-bearing and must not be "tidied" into one helper.
+
+**On the evidence method.** Every new guard was verified by deleting its subject, in an
+eight-row mutation table. That is the `completed-task-lifecycle` DoD-6 lesson applied without
+being asked, and it is why this checkpoint needed no re-litigation.
+
+**Accepted limitations, recorded so they are not mistaken for defects later:** the map only
+knows sessions in which `tdo` has run at least once, so tasks created under an older tmux
+server (ids reset on server restart) are unrecoverable by the hook and must be re-homed from
+the all-tasks view — `design.md:41` calls this best-effort on purpose. Renaming onto a name
+that already holds tasks **merges** them, which is `design.md:44`, and two rows with the same
+text sitting adjacent afterwards is correct.
+
+**Handed to `tpm-plugin-and-install`** (still `draft`, so nothing was edited there): the
+verbatim keybind and hook commands are in the Evidence section; `set-hook -ga` appends, so
+TPM re-running the install script stacks `session-renamed[0]`, `[1]`, … — de-duplicate there
+rather than reverting to `-g`, which would eat the user's own hook; the brace form needs
+`source-file` or careful nested quoting; and `@todo-key` plus binary resolution are that
+task's business.
+
+**Handed forward as a watch item:** `tdo count` is the natural status-line command and a
+status line re-runs it every few seconds, which is a far hotter path than the popup for the
+session-map write this task added. Free today (measured: in the noise, median fractionally
+lower after). If it ever matters, the fix is `SessionName` first and `RecordSession` only on
+a change.
+
+**Curator fix at close-out:** `docs/design.md`'s footer note quoted 42 content columns, which
+was true before this task's own 60 x 15 floor landed. Both tasks were in flight at once, so
+each wrote the number correct at its moment. Corrected to name both figures. The code was
+right either way — `footerText` is 39 columns and fits both.
+
+**CLAUDE.md:** no curator additions needed. The executor had already recorded the
+`run-shell` interpolation trap (both halves: `$0` expansion and the unescapable session
+name), `set-hook -g` vs `-ga`, the session-key-is-a-name rationale, and the
+manufactured-attached-client recipe for `display-popup` tests.
+
+**Worktree:** `../todo-tmux-integration` removed by the executor before this checkpoint.
