@@ -28,7 +28,11 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - `internal/scope` — pane → scope resolution (`Resolver`/`Resolved`), the pure-Go
   git root walker, and the sticky default kind. Injectable: tests need neither a
   tmux server nor a git checkout.
-- `internal/tui` — Bubble Tea popup. Currently a placeholder model.
+- `internal/tui` — Bubble Tea popup: the merged task list. Environment-blind by
+  design — it takes a `Config` (store, resolved scopes, home dir, version) from
+  `internal/cli` and never resolves a scope or reads the clock itself, so
+  `Update`/`View` are testable without tmux. Row formatting lives in `render.go`
+  as pure functions.
 - `internal/cli` — stdlib `flag` with manual subcommand dispatch.
 
 ## Decisions worth knowing
@@ -87,7 +91,27 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `datetime(created_at, 'unixepoch')`.
 - The popup overlay cannot be asserted headlessly — `display-popup` needs an
   attached client. Automated checks run the TUI in a plain tmux pane
-  (`tmux new-session -d … 'bin/tdo tui'` + `capture-pane`) instead.
+  (`tmux new-session -d … 'bin/tdo tui'` + `capture-pane`) instead. `tdo tui` has
+  no `--db` flag, but `store.DefaultPath` honours **`$XDG_DATA_HOME`**, so point
+  that at a temp dir, create the schema with `tdo doctor --db …`, seed rows with
+  the `sqlite3` CLI, and the capture is reproducible without touching the real
+  database. Worth the trouble: this is the only check that catches whole-frame
+  bugs, and it has caught three the unit tests could not see.
+- **Unit tests over `renderRows` do not test the assembled frame.** Both frame
+  bugs found so far were in the *arithmetic between* correct pieces: `chromeHeight`
+  must count the box's two border rows and both blank lines (not just title and
+  footer), and `View` must not append a trailing newline — a frame taller than the
+  pane makes the terminal **scroll**, so the rows that disappear are the top ones
+  (session tier, tier labels), not the bottom.
+- **A row wider than the viewport is silently clipped, not wrapped.** That is how
+  tier labels vanished for real dir keys: a dir scope key is an absolute path, and
+  a label sized from "whatever width is left" gets no width at all. `columns()`
+  guarantees labels a share and left-truncates them (the path *tail* identifies
+  it); `TestRowsNeverExceedTheirWidth` holds every row to its budget.
+- **lipgloss styles render to plain text in tests** — a test process has no colour
+  profile, so asserting on rendered ANSI passes whatever style was chosen. Assert
+  on the style object instead (`textStyle(...).GetStrikethrough()`) and prove the
+  escapes ship with `capture-pane -pe`.
 
 - **`t.TempDir()` is itself under a symlink on macOS** (`/var` -> `/private/var`),
   so scope tests compare against `normalizePath(tmp)`, never the raw temp path.
