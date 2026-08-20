@@ -1,7 +1,7 @@
 # TPM Plugin And Install
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-tpm-plugin-and-install
 
 ## Goal
 Ship the TPM plugin that makes `tdo` reachable from a stock tmux config: a `tmux-todo.tmux`
