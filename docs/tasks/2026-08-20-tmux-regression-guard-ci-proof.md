@@ -437,4 +437,4 @@ Constraints put that in `2026-08-20-assert-tui-config-wiring.md`, and it is stil
 Branch `tmux-regression-guard`, commits `aabfac5` and `38272d4` (with `main` merged in at
 `220eced`), merged into local `main` and the worktree removed. Not pushed.
 
-Merge commit: `<recorded below>`
+Merge commit: `260d8bc` (`git log -1 -p 260d8bc` for the diff; the worktree is gone).
