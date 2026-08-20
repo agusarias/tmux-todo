@@ -1,6 +1,6 @@
 # Completed Task Lifecycle
 
-**Status:** in-progress
+**Status:** review
 **Worktree:** /Users/agusarias/workspace/todo-completed-task-lifecycle
 
 ## Goal
@@ -140,6 +140,29 @@ the strike-through was seen.
   near-dead 24h arm (kept to match `design.md`'s "whichever comes first", and DoD 3 must test
   it explicitly or it will never execute). Status `ready`.
 
+## Decisions (execution)
+- **2026-08-20 (executor):** The toggle write and the re-query are **one** `tea.Cmd`, not a
+  `tea.Sequence` of two. Sequence was the first shape and it is untestable: it produces an
+  unexported `sequenceMsg` that only the Bubble Tea runtime can unwrap, so a test could not
+  drive the toggle at all. One command also keeps the store the single source of truth —
+  the model never patches its own copy of a row to reflect a write, it re-reads.
+- **2026-08-20 (executor):** `writeThenReload` generalises the `reloadCmd` seam rather than
+  adding a parallel path: `reloadCmd` is now `writeThenReload(0, nil)`. The plan asked for a
+  "preserve-selection parameter"; making the anchor a field on `rowsMsg` puts it where the
+  rows arrive, so the cursor is re-anchored in exactly one place regardless of what
+  triggered the reload.
+- **2026-08-20 (executor):** The view now renders the store's error verbatim instead of
+  prefixing "cannot read tasks". With writes flowing through the same error field that
+  prefix would have been wrong half the time; the store already wraps its errors with the
+  operation ("complete task 3: …", "list tasks: …").
+- **2026-08-20 (executor):** DoD 6's test as worded is **vacuous on its own** and is kept
+  only because the DoD names it. Completing a row does not reorder the list, so the cursor's
+  index still lands on the same task whether or not the id lookup exists — the test passes
+  with `anchorCursor`'s body deleted. `TestCursorReAnchorsWhenRowsShift` is the one that
+  actually discriminates: another pane adding tasks shifts every index, which is the real
+  case id-anchoring exists for. Both are in the tree, and the mutation results below show
+  which one earns its keep.
+
 ## Plan
 **Approach:** the whole task is one store field, one injected clock, one key binding, and a
 cursor-anchoring fix. The design intent — "the row must not vanish under your cursor" —
@@ -190,3 +213,189 @@ before any TUI code exists.
 - **Two sources of truth for visibility** if the TUI also filters after `List`. It must not:
   the bound belongs in SQL, per `popup-tui-merged-list` DoD 4 ("render order equals `List`
   order, the TUI performs no sort").
+
+## Evidence
+
+Merge commit recorded below. Toolchain `go1.26.6 darwin/arm64`.
+
+### Tests
+
+`make test` green across every package; `go vet ./...` silent; `gofmt -l .` empty.
+
+```
+$ make test
+go test ./...
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.534s
+ok  	github.com/agusarias/tmux-todo/internal/scope	1.080s
+ok  	github.com/agusarias/tmux-todo/internal/store	0.990s
+ok  	github.com/agusarias/tmux-todo/internal/task	1.025s
+ok  	github.com/agusarias/tmux-todo/internal/tui	1.318s
+```
+
+`internal/store` + `internal/tui` now hold 83 passing tests; this task adds 7 store tests
+and 13 TUI tests (`internal/tui/lifecycle_test.go`).
+
+### Mutation results — every guard shown failing first
+
+**The predicate the plan called the most dangerous** (DoD 2). Replacing
+`(done = 0 OR done_at >= ?)` with the naive `done_at >= ?`:
+
+```
+--- FAIL: TestDoneSinceBoundsOnlyDoneRows
+    the pending task was filtered out by DoneSince; the predicate is catching NULL done_at
+```
+
+That is the failure mode that would empty the popup: a pending row's `done_at` is NULL and
+no comparison against NULL is true. Changing `>=` to `>`:
+
+```
+--- FAIL: TestDoneSinceIsInclusive
+    a row completed exactly at the cutoff was hidden; the bound is exclusive
+```
+
+**The retention arithmetic** (DoD 3). Making `doneSince()` return `openedAt` unconditionally,
+which drops the 24h arm the plan warned would otherwise never execute:
+
+```
+--- FAIL: TestDoneRowHiddenAfterRetentionWindow
+    rows = ["completed in this session"] past the retention window, want it hidden
+--- FAIL: TestDoneSinceIsTheLaterBoundary
+    with a long-open popup doneSince = ...-10-06..., want the retention cutoff ...-10-08...
+```
+
+**The toggle** (DoD 1). Making `space` complete-only:
+
+```
+--- FAIL: TestSpaceTogglesBothDirections
+    space did not uncomplete an already-done row
+```
+
+**The TUI actually passing the bound.** Dropping `DoneSince` from the filter:
+
+```
+--- FAIL: TestDoneRowCompletedBeforeOpenIsHidden
+    rows = ["still to do" "finished earlier"], want only the pending task
+--- FAIL: TestDoneRowHiddenAfterRetentionWindow
+```
+
+**Cursor anchoring** (DoD 6) — and the one negative result worth reading. Deleting the id
+lookup from `anchorCursor`:
+
+```
+$ go test -run CursorReAnchors        # with anchorCursor's body deleted
+ok  	github.com/agusarias/tmux-todo/internal/tui
+```
+
+DoD 6's test as specified does not fail, because completing a row does not reorder the list,
+so the index lands on the same task either way. The added
+`TestCursorReAnchorsWhenRowsShift` does fail, which is why it exists:
+
+```
+--- FAIL: TestCursorReAnchorsWhenRowsShift
+    cursor landed on "from another pane", want to stay anchored to "second"
+    cursor index is still 1; the rows did not shift, so this test proves nothing
+```
+
+### Real-terminal check
+
+The brief said this could not be verified. It can: `store.DefaultPath` honours
+`$XDG_DATA_HOME`, so a seeded throwaway database gives a reproducible `capture-pane` with
+no `--db` flag (now recorded in CLAUDE.md). Seeded across all three tiers plus one row
+completed two days ago, at 78x14:
+
+```
+│  ▸ ⌘ rebase onto main        (session: tdodone)                            │
+│    ⌘ check CI                                                              │
+│    · fix auth redirect       (dir: ~/.claude/jobs/a9c0f4db/tmp/xdg2/repo)  │
+│    ◉ call the dentist       (global)                                       │
+```
+
+The two-day-old completed row is absent on open, as the rule requires — and still in the
+database. Then `j`, `space`:
+
+- the row stayed put under the cursor and did not reorder;
+- `sqlite3` shows `2|1|check CI`, and after a second `space`, `2|0||check CI` — the toggle
+  round-trips through the real binary, and `done_at` is cleared on undo;
+- exactly one row in the frame carries the strike escape (`ESC[2;9m`, SGR 9 =
+  strikethrough, 2 = faint):
+
+```
+│  ▸ · ESC[2;9mfixESC[0;9m ESC[2mauthESC[0;9m ESC[2mredirectESC[0m       ESC[2m(dir: …/repo)ESC[0m  │
+```
+
+A second run gave incidental confirmation of the open-boundary rule: `check CI`, completed
+in the *previous* popup, was hidden when the next popup opened, so `j` landed on a
+different row.
+
+Footer (DoD 9):
+
+```
+│  1/2/3 filter · j/k move · space done · q quit · v70a4619-dirty            │
+```
+
+### Static binary and retention single-definition
+
+`CGO_ENABLED=0 make build` links no libsqlite3 (`libSystem`, `libresolv` only). Grepping the
+tree for a duplicated 24h literal finds only the definition itself and two test references
+(one an unrelated `PurgeDone` test, one the assertion pinning the constant):
+
+```
+internal/store/tasks.go:32:const DoneRetention = 24 * time.Hour
+internal/store/tasks_test.go:672:	if DoneRetention != 24*time.Hour {
+```
+
+### Definition of done
+
+| # | Item | Status |
+|---|---|---|
+| 1 | `space` toggles both directions in normal mode | met — round-trip test, mutation-checked |
+| 2 | `Filter.DoneSince`, additive, bounds done rows only | met — 5 store tests, both mutations caught |
+| 3 | TUI passes `max(openTime, now-24h)`, recomputed per reload | met — frozen clock, row hidden while `Get` still finds it |
+| 4 | `Config.Now` injected, defaulting to `time.Now` | met — no other `time.Now()` in `internal/tui` |
+| 5 | Retention defined once | met — `store.DoneRetention`, grep above |
+| 6 | Cursor re-anchors by task id | met — with the caveat above: the DoD-worded test is vacuous, `TestCursorReAnchorsWhenRowsShift` is the real guard |
+| 7 | Toggled row stays visible, struck, in position | met — headless and in a real terminal |
+| 8 | `Complete`'s doc comment corrected | met |
+| 9 | Footer gains `space done` | met — **see the regression below** |
+| 10 | A tier of only-done rows is not an empty state | met — `TestStruckRowsAreNotAnEmptyState` |
+| 11 | tests / vet / gofmt / static build | met |
+| 12 | Real SQLite under `t.TempDir()` | met |
+| 13 | Per-package detail in doc comments, not CLAUDE.md | met — no CLAUDE.md change in this task |
+
+### Regression this task introduces into a known live defect
+
+DoD 9 required the footer to grow, and it does — which makes
+`popup-tui-merged-list`'s **rejected** Checkpoint 2 defect materially worse. That task's
+`footer()` is never truncated to the content width while `chromeHeight` assumes it occupies
+one row, so a wrapped footer scrolls the top of the frame away. Measured minimum popup width
+before and after adding `space done`:
+
+| `Version` stamp | before | after |
+|---|---|---|
+| `dev` | 45 | **58** |
+| `ec132f9` | 49 | **62** |
+| `v0.1.0-3-gec132f9-dirty` | 65 | **78** |
+
+`docs/design.md:47` sizes the popup at ~60%x60%, i.e. 48 columns on a standard 80x20
+terminal — now below the threshold for every build stamp, where before only a `-dirty`
+describe crossed it.
+
+**Deliberately not fixed here.** Truncating `footer()` and adding the frame-invariant test
+is `popup-tui-merged-list`'s DoD 20 and its fix-forward plan delta; that task is `ready` with
+a written plan, and absorbing its scope would duplicate the work and muddy both diffs. Flagged
+so the curator can sequence it next — it is the natural next pick, and this task raises its
+urgency rather than creating it. No user is exposed yet: the `display-popup` keybind and
+sizing belong to `tmux-integration-and-rename-hook` and do not exist, so nothing runs the
+popup at 48 columns today.
+
+### Not verified
+
+- `store.PurgeDone` still has no caller, by design (Constraints). Nothing in this task
+  deletes a row, and `TestDoneSinceBoundsOnlyDoneRows` asserts the aged-out row is still
+  retrievable via `Get` and still counted by `Count`.
+- Whether done rows appear in the `g` all-tasks view — left open by the brief for
+  `all-tasks-view-with-sesh-jump`, and untouched here.
+- Behaviour of a popup left open across a real 24h boundary was proven with a frozen clock,
+  not with a real one; that is what injecting the clock bought.
+

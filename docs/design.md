@@ -74,10 +74,18 @@ All three scopes **merged into one list** with a per-row scope glyph.
 
 ### Completion vs deletion
 
-- `space` completes: the row stays visible **struck-through** so the action is legible and
-  reversible in the moment.
-- Completed rows are **purged from the view** on popup close or after 24h, whichever comes
-  first. The row remains in the DB marked done — history and stats stay possible later.
+- `space` **toggles** completion: the row stays visible **struck-through** so the action is
+  legible and reversible in the moment. Pressing `space` again undoes it, which is the only
+  undo the product has until an undo stack lands.
+- Completed rows are **hidden from the view**, never deleted. A row you complete now stays
+  on screen for the rest of this popup; one that was already done when the popup opened, or
+  completed more than 24h ago, is hidden when you arrive. The row remains in the DB marked
+  done — history and stats stay possible later.
+
+  *(Earlier wording said rows were "purged from the view" **and** that they remain in the
+  DB. The only store primitive for purging is a hard `DELETE`, so those two halves could not
+  both hold; resolved as hide-only. `store.PurgeDone` therefore has no caller and exists for
+  an explicit `tdo purge` if one is ever wanted.)*
 - `d` deletes outright.
 
 ### All-tasks view
