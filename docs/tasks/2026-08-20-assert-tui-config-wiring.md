@@ -1,6 +1,6 @@
 # Assert What `tui.Config` Is Actually Wired With
 
-**Status:** ready
+**Status:** agreed
 **Worktree:** none
 
 ## Goal
@@ -93,9 +93,9 @@ to find out whether that belief is warranted.
   brief triaged as a two-line test change from quietly becoming something else.
 
 ## Plan
-**Approved at Checkpoint 1 on 2026-08-20.** `internal/cli` only, test-only except that
-`TestTUIWiringSmoke`'s stale doc comment goes. The plan is disposable; Goal, Constraints and
-Definition of done are not — changing those is a scope event, so set `blocked` instead.
+*Awaiting Checkpoint 1.* `internal/cli` only, test-only except that `TestTUIWiringSmoke`'s
+stale doc comment goes. The plan is disposable; Goal, Constraints and Definition of done are
+not — changing those is a scope event, so set `blocked` instead.
 
 **Approach.** `runTUIProgram` already gives the test the `tui.Config` for free — the seam
 landed with `tmux-regression-guard-ci-proof` (merge `260d8bc`), so the Constraint that would
