@@ -1,6 +1,6 @@
 # Popup TUI Merged List
 
-**Status:** review
+**Status:** done
 **Worktree:** none (removed after merge)
 
 ## Goal
@@ -661,3 +661,77 @@ and subtests.
   padding (6 columns) dominate and the popup is not usable at any content; `contentWidth`
   floors at 1 rather than going negative.
 
+
+---
+
+## Close-out
+
+### 2026-08-20 — Checkpoint 2 APPROVED (2nd, fix-forward). Status `done`.
+
+Merges `a0155d9` (first pass) and `e831b42` (fix-forward) both stand on local `main`,
+unpushed. The first pass was audited at the first checkpoint and rejected only for the
+footer defect; this close-out covers the fix-forward delta (`1761312`).
+
+**Re-verified independently, not taken on trust:** `make test` green across all five
+packages, `go vet ./...` silent, `gofmt -l .` empty, `CGO_ENABLED=0 make build` linking
+only `libSystem` + `libresolv`. `TestFrameNeverExceedsThePane` runs 108 subtests. `go list
+-deps ./internal/tui` has zero hits for `internal/scope` (DoD 2 still holds).
+
+**Both mutation claims reproduce exactly.** Removing `footer()`'s truncation — the shipped
+bug — fails **56** subtests. Miscounting `chromeHeight` from 6 to 5 fails **216**
+assertions, splitting evenly: 108 × *"frame is 15 rows in a 14-row pane; the terminal will
+scroll and the top rows are lost"* and 108 × *"the height backstop fired (15 rows -> 14);
+it is a safety net, not the mechanism"*.
+
+**All 20 DoD items met**, with one deviation recorded rather than waved through:
+
+- **DoD 20 was satisfied by a better test than it specifies.** Its wording asks for a table
+  test *"over `View()`"*. The test asserts on `frame()` instead, and that difference is the
+  whole value of the fix: `View` applies the `clampHeight` backstop, so an assertion over
+  its output silently absorbs any `chromeHeight` miscount and stays green — which is
+  precisely the failure mode that let the original bug hide behind a constant. The
+  executor hit this, mutated its own test, found it could not fail, and split `frame()` out.
+  **Anyone revisiting DoD 20 should read it as `frame()`, not `View()`.** Asserting on the
+  clamped output would re-open the class this task closed.
+- Table coverage exceeds the DoD's ask: 9 pane sizes (40x10, 44x12, 48x12, 52x14, 64x14,
+  72x16, 80x20, 100x24, 120x30) × 3 `Version` stamps × 4 filter states. DoD 20 named
+  40/44/48/64 and a long version; all present, and the two sizes that actually failed
+  (48x12, 64x14) were additionally re-captured in a real tmux pane.
+
+**`clampHeight` is dead-by-design and that is acceptable here.** It should never fire, and
+a dead safety net is normally a smell — dead assumptions are what hid this very bug. It is
+covered from the other side: the test asserts it does *not* fire, so if it ever starts
+firing the suite says so instead of papering over a frame bug. The asymmetry argument for
+keeping it holds — losing our own bottom border beats the terminal eating the session tier
+and the tier labels.
+
+**All non-blocking audit items from the first rejection are closed:** `render.go`'s dangling
+`textStyle` godoc fixed; `runTUI`'s zero coverage now has `TestTUIWiringSmoke` (which
+redirects `$XDG_DATA_HOME` first — the detail that keeps it off the developer's real
+database) and `TestTUIReportsAnUnopenableDatabase`, both passing; the dependency bump is
+remarked in Evidence with the five ambiguous-width glyphs measured at `lipgloss.Width` = 1
+under the new `clipperhouse/displaywidth` backend, so the accepted risk now stands against
+the implementation actually in the tree rather than the one it was accepted against.
+
+**CLAUDE.md:** the frame-bug pitfall was rewritten from two bugs to three, and two entries
+added — *every* line `View` assembles must be truncated to `contentWidth` (lipgloss wraps
+rather than clips, and `Version` comes from `git describe`, so the minimum usable width
+depended on the build's git state), and the rule that the frame invariant must be asserted
+on the unclamped `frame()`. Per repo convention no per-package detail was added; that lives
+in the doc comments on `contentWidth`, `frame`, `clampHeight` and `chromeHeight`.
+
+**Carried forward, unchanged accepted risks:** ambiguous-width terminals (the library
+reports 1 column for every glyph the layout depends on, but a terminal set
+`ambiguous-width=double` would still shift columns — now with a harness that could check
+it); the `display-popup` overlay itself, which needs an attached client, so every capture
+is a plain tmux pane; and widths below 40 columns, where the box's own 6 columns of border
+and padding dominate and `contentWidth` floors at 1.
+
+**Downstream note:** `completed-task-lifecycle` (merged `03eb37a`, now `done`) widened the
+footer with `space done` and flagged that it made this defect worse, deliberately deferring
+the fix here rather than absorbing another task's scope. That deferral is now discharged —
+and `design.md:71`'s end-state footer is 92 columns, so the follow-on UI tasks would each
+have raised the threshold again. The invariant test is what makes that safe.
+
+**Worktree:** removed by the executor before this checkpoint. `main` is unpushed; pushing
+remains the user's call.

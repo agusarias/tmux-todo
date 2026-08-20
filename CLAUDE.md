@@ -118,12 +118,29 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   the `sqlite3` CLI, and the capture is reproducible without touching the real
   database. Worth the trouble: this is the only check that catches whole-frame
   bugs, and it has caught three the unit tests could not see.
-- **Unit tests over `renderRows` do not test the assembled frame.** Both frame
-  bugs found so far were in the *arithmetic between* correct pieces: `chromeHeight`
-  must count the box's two border rows and both blank lines (not just title and
-  footer), and `View` must not append a trailing newline — a frame taller than the
-  pane makes the terminal **scroll**, so the rows that disappear are the top ones
-  (session tier, tier labels), not the bottom.
+- **Unit tests over `renderRows` do not test the assembled frame.** All three frame
+  bugs so far were in the *arithmetic between* correct pieces: `chromeHeight` must
+  count the box's two border rows and both blank lines (not just title and footer),
+  `View` must not append a trailing newline, and `footer()` went untruncated while
+  `chromeHeight` assumed it was one row. A frame taller than the pane makes the
+  terminal **scroll**, so the rows that disappear are the top ones (session tier,
+  tier labels), not the bottom.
+- **Every line `View` assembles must be truncated to `contentWidth`, not just the
+  task rows.** lipgloss *wraps* an over-wide line rather than clipping it, so one
+  long chrome line silently becomes two rows and the frame outgrows `chromeHeight`.
+  The footer was the case that shipped: its width is `36 + len(Version)` and the
+  Makefile stamps `Version` from `git describe --tags --always --dirty`, so the
+  minimum usable popup width **depended on the build's git state** — a `-dirty`
+  describe needed 78 columns where `dev` needed 58, against the ~48 that
+  `design.md:47`'s 60%x60% gives on an 80x20 terminal. Truncate the plain text and
+  let the styles wrap the result; slicing a *rendered* string cuts through an ANSI
+  escape.
+- **`TestFrameNeverExceedsThePane` closes that class — and it must assert on the
+  unclamped `frame()`, never on `View()`.** `View` applies a `clampHeight`
+  backstop, so an assertion over its output absorbs any `chromeHeight` miscount and
+  stays green; the same mutation against `frame()` fails 216 assertions. Assert that
+  the backstop *did not fire* alongside the dimensions. A safety net that hides the
+  bug it catches is worse than no net, and this pattern has now caught itself once.
 - **A row wider than the viewport is silently clipped, not wrapped.** That is how
   tier labels vanished for real dir keys: a dir scope key is an absolute path, and
   a label sized from "whatever width is left" gets no width at all. `columns()`
