@@ -1,7 +1,7 @@
 # All-tasks View With Sesh Jump
 
-**Status:** ready
-**Worktree:** none
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 `g` toggles a wide view of every task in the database grouped by scope — including scopes
@@ -575,4 +575,8 @@ Case C is the `sesh`-absent run the Verification section asks for: a PATH holdin
 
 ### Merge
 
-Branch `all-tasks-view`, merged into local `main` (not pushed). Merge commit: see below.
+Branch `all-tasks-view`, commit `2978ae0`, merged into local `main` with `--no-ff` and the
+worktree removed. Not pushed — that stays the user's call via the curator. The merge commit
+hash is recorded in the line below, added on `main` after the merge.
+
+Merge commit: `<recorded below>`
