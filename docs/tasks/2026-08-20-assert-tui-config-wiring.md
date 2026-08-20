@@ -167,4 +167,109 @@ existing file unwieldy — executor's call), plus deleting the stale doc comment
   bug straight back. The in-tmux sweep leg (DoD 7) is the check that it has not.
 
 ## Evidence
-(Added by the executor.)
+
+**Where the work landed.** One new file, `internal/cli/wiring_test.go` (~400 lines, test-only).
+No production file changed: `git diff --stat` against the branch point is empty for everything
+outside that file. DoD 6 needed nothing — `tmux-regression-guard-ci-proof` had already
+replaced the stale "Bubble Tea needs a TTY" comment (`grep -rn "needs a TTY" internal/` is
+empty).
+
+**Tests added.** `TestTUIConfigWiring` (the in-tmux leg, one subtest per field),
+`TestEveryTUIConfigFieldIsAsserted` (the reflect guard), `TestTUIConfigWiringOutsideTmux`
+(DoD 5) and `TestTUIConfigDefaultScopeDegrades` (DoD 3's fallback case).
+
+```
+$ go test ./internal/cli/ -run 'TestTUIConfig|TestEveryTUIConfigField' -v
+--- PASS: TestEveryTUIConfigFieldIsAsserted (0.00s)
+--- PASS: TestTUIConfigWiring (0.01s)
+    --- PASS: TestTUIConfigWiring/DB (0.00s)
+    --- PASS: TestTUIConfigWiring/Scopes (0.00s)
+    --- PASS: TestTUIConfigWiring/Home (0.00s)
+    --- PASS: TestTUIConfigWiring/Version (0.00s)
+    --- PASS: TestTUIConfigWiring/DefaultScope (0.00s)
+    --- PASS: TestTUIConfigWiring/SetSticky (0.00s)
+    --- PASS: TestTUIConfigWiring/LiveSessions (0.00s)
+    --- PASS: TestTUIConfigWiring/Now (0.00s)
+--- PASS: TestTUIConfigWiringOutsideTmux (0.00s)
+--- PASS: TestTUIConfigDefaultScopeDegrades (0.00s)
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.235s
+```
+
+### The mutation table (DoD 4 — the primary evidence)
+
+Ten mutations, each applied to `runTUI`'s `tui.Config` literal (the last to `tui.Config`
+itself), the four tests run, then the file restored byte-for-byte. Every one fails, and the
+run after each restore is green. Driven by a throwaway script; nothing in it is committed.
+
+| # | Mutation | Result | Test that caught it | Message |
+|---|---|---|---|---|
+| 1 | `DB: nil` | FAILS | `TestTUIConfigWiring/DB` | `DB is nil — the popup has no store to read` |
+| 2 | `Scopes: nil` | FAILS | `.../Scopes`, `OutsideTmux`, `DefaultScopeDegrades` | `Scopes = [], want [{Kind:session Key:work} {Kind:dir Key:/private/var/…} {Kind:global Key:}]` |
+| 3 | `Home: ""` | FAILS | `.../Home` | `Home = "", want "/var/folders/…/003"` |
+| 4 | `Version: ""` | FAILS | `.../Version` | `Version = "", want "dev"` |
+| 5 | `DefaultScope: "global"` (hardcoded) | FAILS | `.../DefaultScope`, `DefaultScopeDegrades` | `DefaultScope = "global", want the stored sticky default "dir"` |
+| 6 | `SetSticky: nil` | FAILS | `.../SetSticky` | `SetSticky is nil — the sticky default would silently stop persisting` |
+| 7 | `SetSticky: func(task.ScopeKind) error { return nil }` | FAILS | `.../SetSticky` | `after SetSticky("global") the state dir reads back "dir" — the write did not land` |
+| 8 | `LiveSessions: nil` | FAILS | `.../LiveSessions`, `OutsideTmux` | `LiveSessions = map[], want map[spare:true work:true]` |
+| 9 | `Now: time.Now` (wiring a clock the popup defaults itself) | FAILS | `.../Now` | `Now = 0x10048b7b0, want nil: the popup defaults it to time.Now` |
+| 10 | `tui.Config` gains `Throwaway string` | FAILS | `TestEveryTUIConfigFieldIsAsserted` | `tui.Config.Throwaway (string) has no entry in wiringChecks…` |
+
+Mutation 7 is the one this task exists for: a non-nil `SetSticky` stub passes any
+"is it wired" check and fails the round trip. Mutation 10 is DoD 1b — it is what distinguishes
+a reflect walk over the struct from one over the map, which would have been vacuous.
+
+```
+BASELINE: green
+… (ten mutations, all FAILS) …
+RESTORED: green
+$ git status --short
+?? internal/cli/wiring_test.go       # no residue from any mutation
+```
+
+### Sweep (DoD 7)
+
+```
+$ make test
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.920s
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.861s
+ok  	github.com/agusarias/tmux-todo/internal/store	1.007s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.963s
+ok  	github.com/agusarias/tmux-todo/internal/tui	6.400s
+
+$ make lint      # go vet ./... + gofmt check — no output, exit 0
+$ gofmt -l .     # empty
+```
+
+**Inside tmux** (private socket, so the developer's server is untouched) — the check that this
+task did not re-introduce its parent's hang:
+
+```
+$ tmux -L tdo-wiring new-session -d -c <worktree> 'make test > intmux.log 2>&1; echo EXIT=$? >> …'
+$ cat intmux.log
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.482s
+ok  	github.com/agusarias/tmux-todo/internal/scope	1.455s
+ok  	github.com/agusarias/tmux-todo/internal/store	(cached)
+ok  	github.com/agusarias/tmux-todo/internal/task	(cached)
+ok  	github.com/agusarias/tmux-todo/internal/tui	7.556s
+EXIT=0
+```
+
+It completed rather than hanging. `store` and `task` came from the cache; `internal/cli` and
+`internal/tui` — the two that could reach a terminal — both ran fresh.
+
+### Two things found while doing it
+
+1. **The `tui.Config.DB` is only open while the popup runs.** `runTUI` defers `closeDB`, so an
+   assertion made after `Run` returns can only ever see `sql: database is closed`. The first
+   version of the DB check failed for exactly that reason; the usability probe now happens
+   inside the stub, which is the only moment the handle is live. Added to CLAUDE.md.
+2. **The check closures deliberately do not call `t.Helper()`.** With it, every field failure
+   was reported at the dispatch line (`wiring_test.go:342`) rather than at the assertion that
+   fired — visible in the first mutation run, fixed in the second.
+
+### Not done
+
+`make test-plugin` was not run: it drives the TPM shell harness and this change is test-only
+Go in `internal/cli`, which that harness does not touch.
+
+**Merge commit:** (recorded below after the merge.)
