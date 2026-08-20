@@ -1,7 +1,7 @@
 # CLI Surface
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-cli-surface
 
 ## Goal
 Build the non-interactive surface over the shared core: `tdo add` with scope flags,
