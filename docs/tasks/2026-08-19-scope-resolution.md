@@ -1,7 +1,7 @@
 # Scope Resolution
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** /Users/agusarias/workspace/todo-scope-resolution
 
 ## Goal
 Resolve the three independent scopes for the current context: `global`, `dir` (active
