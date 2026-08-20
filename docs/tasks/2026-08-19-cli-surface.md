@@ -108,6 +108,14 @@ a one-line command, so id handling and the not-found path must be exact.
 - **2026-08-20 (curator):** No colour and no TTY detection in v1. Scriptability first, and the
   popup is where presentation effort belongs.
 
+- **2026-08-20 (curator):** `scope-resolution` has landed on `main` (`03d96c4`) but was
+  **rejected at Checkpoint 2** and is back at `ready` for a one-line tmux-wiring fix, so this
+  task stays parked at `agreed`. Two API facts to absorb when it unparks, both inside this
+  brief's own pre-authorized drift clause: there is **no package-level `scope.StickyDefault`**
+  (it is a method on `Resolver`), and the field is `TmuxEnv`, not `TmuxSocket`. Consequence
+  for the plan: `env` must hold a `scope.Resolver`, not just a `scope.Resolved` — it needs the
+  receiver for both `StickyDefault` and `SetStickyDefault`. Also note `Resolved.Has` was added
+  post-plan and `Resolved.Active()` is what feeds `store.Filter.Scopes`.
 ## Plan
 All work in `internal/cli`; no new packages, no changes to `store` or `scope`.
 

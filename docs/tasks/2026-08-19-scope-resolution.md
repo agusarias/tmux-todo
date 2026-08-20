@@ -1,7 +1,7 @@
 # Scope Resolution
 
-**Status:** review
-**Worktree:** none (removed after merge)
+**Status:** ready
+**Worktree:** none
 
 ## Goal
 Resolve the three independent scopes for the current context: `global`, `dir` (active
@@ -134,6 +134,70 @@ the Decisions log below and testing them directly.
   either accept a longer file, or move per-package detail into the package doc comments (which
   already carry most of it) and keep CLAUDE.md to commands, layout and cross-cutting rules.
   Not restructuring it unilaterally — it is not this task's scope.
+
+- **2026-08-20 (curator, Checkpoint 2 — REJECTED, fix forward):** `03d96c4` stays on `main`;
+  this task returns to `ready` for a scoped follow-up. 10 of 11 DoD items are satisfied and
+  the evidence is the most honest in the queue (it volunteers its own 14.7ms outlier and the
+  12ms tail). Re-verified independently: 28 tests pass, `make lint` silent, `otool -L` shows
+  no libsqlite3, `TestAgreesWithGitBinary` really runs rather than skipping, and
+  `git show --stat 03d96c4` confirms **zero** `internal/store` files touched — the store is
+  still environment-blind. The rejection is one code bug, not an evidence problem.
+- **2026-08-20 (curator, Checkpoint 2 — DoD 3 FAILS IN PRODUCTION):** `Resolve()` can never
+  see tmux. `scope.go:63` is `func Resolve() (Resolved, error) { return Resolver{}.Resolve() }`,
+  and `Resolver{}` has `TmuxEnv == ""`, which is exactly what `queryTmux` short-circuits on.
+  **No non-test code in the package reads `os.Getenv("TMUX")`** — the only `Getenv` is
+  `XDG_STATE_HOME` in `sticky.go:109`. Verified from a live tmux pane with `$TMUX` set:
+
+  ```
+  package-level Resolve(): Session=<nil>  Dir=&{dir /Users/agusarias/workspace/todo}
+  explicit TmuxEnv:        Session=&{session probe-chk}
+  ```
+
+  User-visible consequence: `tdo add --session` returns `ErrUnavailable` from inside tmux, and
+  `StickyDefault` silently degrades `session` → `dir` for every user, because it keys off
+  `rs.Session != nil` and `rs.Session` is always nil in production. Session scope — the
+  product's main axis — is unreachable through the documented API.
+- **2026-08-20 (curator):** This is the DoD-9 pattern from `sqlite-store-and-migrations`
+  repeating in a new package, and it is worth naming as a recurring failure mode: **all 28
+  tests pass because every one of them injects the thing production forgets.**
+  `scope_test.go:230` and `:278` both construct `Resolver{TmuxEnv: os.Getenv("TMUX")}` — the
+  test does the wiring the shipped entry point omits. The Evidence's live tmux check ran that
+  same test binary, so it validated the injected path, not `Resolve()`. A test that injects a
+  dependency cannot prove the production default is wired.
+
+## Fix-forward scope (2026-08-20, curator)
+
+Only these three items. Nothing else about the implementation is in question, and the Goal,
+Constraints and DoD are unchanged — this is a `how` fix, not a scope event.
+
+1. **Wire the real environment into `Resolve()`.** The package-level entry point must default
+   `TmuxEnv` from `os.Getenv("TMUX")` (and `Run`/`Getwd` are already defaulted). Keep
+   `Resolver` fully injectable for tests — the fix is about the *default*, not the seam.
+   Correct the package doc comment, which currently claims the zero value talks to the real
+   environment.
+2. **Test the package-level entry point, not just the injected one.** At least one test must
+   exercise `scope.Resolve()` itself and assert session presence tracks the real `$TMUX`.
+   Without it this bug reappears the moment someone refactors the default.
+3. **Decouple `TestResolveAgainstRealEnvironment` from bare `$TMUX`.** It currently fails on a
+   machine where `$TMUX` is set but the server is gone:
+   `TMUX="/tmp/fake,1,0" go test ./internal/scope/` →
+   `scope_test.go:258: Session is absent despite $TMUX being set`, while
+   `env -u TMUX go test ./internal/scope/` passes. Gate it on a live-server check
+   (`tmux display-message` succeeding) rather than on `$TMUX` being non-empty, so it survives
+   CI and SSH-into-a-detached-session. DoD 11's timing number comes only from this test, so
+   keep the probe — just make its precondition honest.
+
+## Decisions (continued)
+- **2026-08-20 (curator, downstream API note):** `cli-surface`'s plan assumed a package-level
+  `scope.StickyDefault`; it shipped as a **method** on `Resolver`, and the field is `TmuxEnv`
+  rather than the plan's `TmuxSocket`. Both fall inside that brief's own pre-authorized
+  absorption clause, so **no scope event** — but its `env` struct must hold a
+  `scope.Resolver`, not just a `scope.Resolved`, since it needs the receiver for both
+  `StickyDefault` and `SetStickyDefault`. Noted on that brief too.
+- **2026-08-20 (curator, repo-wide):** CLAUDE.md length question answered, per the executor's
+  own suggestion: **CLAUDE.md keeps commands, layout and cross-cutting rules; per-package
+  specifics move into package doc comments** where the code is. Applies to the six remaining
+  tasks, so nobody re-raises it per-task.
 
 ## Plan
 Single package, `internal/scope`, replacing the doc-only stub. No other package changes —
