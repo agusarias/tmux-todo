@@ -1,6 +1,6 @@
 # Make The Tmux Regression Guard CI-Proof
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged and removed)
 
 ## Goal
@@ -438,3 +438,47 @@ Branch `tmux-regression-guard`, commits `aabfac5` and `38272d4` (with `main` mer
 `220eced`), merged into local `main` and the worktree removed. Not pushed.
 
 Merge commit: `260d8bc` (`git log -1 -p 260d8bc` for the diff; the worktree is gone).
+
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `260d8bc` stays on local `main`; not pushed.
+
+**All five DoD items met**, including the widened DoD 5. The scope event that produced the
+widening is recorded above; the executor stayed exactly inside it — `git show 38272d4 --stat`
+is two files, one `var` and one call site in `internal/cli/cli.go` plus its tests, with the
+`internal/scope` work in `aabfac5`. Asserting `tui.Config`'s *contents* was left where the
+Constraints put it.
+
+**Independently verified by the curator, the same way the bug was.** Last pass this session
+reproduced the hang directly: `make test` inside a tmux pane blocked to a 20s timeout panic.
+This pass, on current `main`, in a tmux pane on a private socket: **`make test` completes in
+5s, exit 0.** The claim and the counter-claim were both measured rather than read.
+
+**What this task actually fixed, in order of how much it mattered.**
+
+1. **`make test` was broken for every developer** and nobody had noticed, because the
+   failure mode is a hang rather than a red test — and the one command that would surface it
+   is the one that hangs. It predated this session's work (reproduced at `cf328ba`).
+2. **The original vacuity is closed.** With `NewResolver()` reverted to `return Resolver{}`,
+   `env -u TMUX go test ./internal/scope/` goes from 36 pass / 0 fail to 48 pass / **2 fail**.
+   The regression net for a bug that already shipped once now discriminates on the only kind
+   of machine CI has.
+3. **The new guard fails outside tmux too**, which is the non-obvious requirement. A hang is
+   invisible to a runner; an exit code of 1 plus "the substituted program ran 0 times" is not.
+   A guard that only fired inside tmux would have reproduced this task's own original sin.
+
+**The "Not proven here" section is correct and worth keeping.** No test can assert the
+absence of a hang — the seam's call count is a proxy, and the in-tmux `make test` run is the
+direct evidence for *this* tree only. A future package that starts a terminal program from a
+test will need its own seam. And there is still no CI: `env -u TMUX` is the stand-in for a
+tmux-less runner, which is why `2026-08-20-release-binaries-and-ci.md` exists.
+
+**CLAUDE.md updated by the curator** (the executor did not, and this is Step 7's job): the
+`/dev/tty` finding and the `runTUIProgram` seam, generalised to "any package that starts a
+terminal program from a test needs the same seam, and its guard must fail outside tmux too".
+
+**Downstream:** `2026-08-20-assert-tui-config-wiring.md` (`draft`) has a Constraint requiring
+this seam to have landed. It has, so that task is now executable whenever it is grilled — no
+longer at risk of being immediately `blocked`.
+
+**Worktree:** `../todo-tmux-regression-guard` removed by the executor before this checkpoint.

@@ -238,6 +238,33 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   makes it evidence that the *contract* is implemented. A golden captured from
   `tdo list --json` would have pinned any bug just as firmly and passed just as
   green — it proves only that the code agrees with itself.
+- **A `go test` process is *not* TTY-less inside tmux, and that hung `make test` for
+  months of commits.** Bubble Tea opens `/dev/tty` directly, so redirecting a test's stdout
+  hides nothing from it: `tui.Run` really renders the popup into the developer's pane and
+  blocks forever on a keystroke. `go test ./...` prints package results in command-line
+  order, so one hung package means `make test` never finishes — and for a tmux plugin,
+  "inside tmux" is where every developer runs it. `internal/cli` starts the popup through
+  `var runTUIProgram = tui.Run` so a test can substitute it. Any future package that starts a
+  terminal program from a test needs the same seam; and note the guard has to fail *outside*
+  tmux too (it asserts the substituted program ran), because a hang is invisible to CI.
+- **tmux target names need `=` to match exactly** — `switch-client -t dev` will happily land
+  on `dev-2`, since tmux falls back to prefix and then fnmatch matching. `internal/cli`'s
+  `target()` prepends it. **But do not apply it to `new-session -s`**: that argument is a name
+  to *create*, not a target to match, so `=work` would create a session literally called
+  `=work`. A name containing `:` cannot be targeted at all — tmux splits on it — which is why
+  re-home exists as the way out.
+- **`tmux switch-client` works from *inside* a `display-popup -E` command**, and takes effect
+  immediately rather than needing the popup to close first: the client moves while the popup's
+  command is still running, and stays there after it exits. Verified on 3.7b. So the jump
+  needs no deferred-execution machinery — `internal/cli` just runs it before `tdo` returns.
+  (`display-popup` needs `-c <client>`; `-t <session>` fails with "no current client". To get
+  an attached client headlessly, attach from inside another pane's pty — `TMUX=` must be
+  cleared or tmux refuses to nest.)
+- **`sesh connect` needs `-s`/`--switch` inside a popup**, because the client is already
+  attached and bare `connect` *attaches*. And `sesh` may not know the name at all: `sesh list`
+  blends live sessions, zoxide directories and config entries, while a stale tdo scope key is
+  a *dead tmux session name*. Every sesh call therefore has a `tmux new-session -d` +
+  `switch-client` fallback behind it — `sesh` is an optional enhancement, never a dependency.
 
 ## Worktrees
 

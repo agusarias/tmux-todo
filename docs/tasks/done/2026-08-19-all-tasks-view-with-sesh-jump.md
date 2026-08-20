@@ -1,6 +1,6 @@
 # All-tasks View With Sesh Jump
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged and removed)
 
 ## Goal
@@ -580,3 +580,67 @@ worktree removed. Not pushed — that stays the user's call via the curator. The
 hash is recorded in the line below, added on `main` after the merge.
 
 Merge commit: `4abf551` (`git log -1 -p 4abf551` for the diff; the worktree is gone).
+
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `4abf551` stays on local `main`; not pushed.
+
+**All 23 DoD items met.** This closes `design.md`'s v1 feature cut line: three scopes, merged
+popup, add/edit/complete/delete/re-scope, all-tasks view with sesh jump, rename hook, full CLI
+with `--json`. Only **distribution** remains (`tpm-plugin-and-install`, `ready`).
+
+**Independently re-verified on current `main`:** full suite green across all five packages,
+`go vet` silent, `gofmt -l .` empty.
+
+**The evidence that carried this checkpoint** was the real-tmux jump, because it is the one
+claim no unit test can make. All three branches, on a private socket with a manufactured
+attached client, `list-clients` before and after: live → `switch-client` moved `work` → `other`;
+not-running → `sesh connect -s` moved `work` → `ghost`; and **sesh absent** — a `PATH` with
+`tmux` and `sqlite3` but no `sesh` — still landed in `ghost` via `tmux new-session -d` +
+`switch-client`. "sesh is an optional enhancement, never a dependency" is now demonstrated
+rather than intended.
+
+**The refactor's guard held, which was the plan's whole safety argument.** Step 1 required
+every existing `internal/tui` test to pass **unedited** after the row model changed, on the
+grounds that needing to edit one would mean the refactor changed behaviour. It did hold: the
+only test edits are the ones the DoD forced, each named and justified — the sanctioned
+`(Jump, error)` signature, two `helpLines` call sites (one *widened* to cover both views),
+three `m.queued` type sites, and `g` moving off `TestUnhandledKeysDoNothing`, which that
+test's own comment had reserved for this task. A 152-line `rows.go` now serves both views,
+and the merged view is the degenerate all-`rowTask` case, so cursor movement, anchoring, the
+viewport scroll math and the input row each exist once.
+
+**`internal/cli/jump.go` is the critical surface and it is right.** Read closely at this
+checkpoint. Every session name is a separate `exec.Command` argv element, so no shell ever
+re-parses it. The subtle part is `target()`: it prepends `=` to force exact matching, because
+`switch-client -t dev` otherwise falls through to prefix and then fnmatch matching and can
+land on `dev-2` — and it is applied to `attach -t` and `switch-client -t` but **not** to
+`new-session -s`, where the argument is a name to *create*. Getting that backwards would
+create a session literally called `=work`. All four call sites are correct. The comment
+explaining the whole invocation table, including why outside-tmux must attach rather than
+switch, is in the file rather than only in this brief.
+
+**Two `how` decisions taken during execution, both sound.**
+
+1. **Group delete bound to `D`, not `d`.** The brief left the key unspecified — `design.md`
+   said stale groups "support re-home (`r`) and delete" without naming it. Binding it to
+   shift-`d` keeps a group-sized destructive action off the same keystroke as a row-sized one,
+   which is the right instinct given `d`/`u` is the product's only undo. Recorded in
+   `design.md`.
+2. **Metacharacter safety pinned on the argv rather than end to end.** The executor argues the
+   argv assertion is the stronger of the two because it fails on the *cause* — a name split,
+   quoted or spliced — rather than on whether one particular payload happened to be harmless.
+   Curator agrees; a payload test proves only that that payload was safe.
+
+**Accepted limitations, recorded so they are not mistaken for defects.** A session name
+containing `:` cannot be a tmux target at all, so such a group cannot be jumped to — a tmux
+limit the rename hook already documents, and re-home is the way out and works on it. Liveness
+is resolved once when the popup opens, so a session killed mid-popup still reads `(live)`;
+`Enter` then falls through to create-and-switch, so the stale label costs nothing.
+
+**CLAUDE.md updated by the curator** (the executor did not, and this is Step 7's job): the
+`=`-for-exact-match rule with its `new-session -s` exception; that `switch-client` works from
+inside a live `display-popup -E` and takes effect before the popup closes, with the headless
+attached-client recipe; and `sesh connect -s` plus why every sesh call needs a tmux fallback.
+
+**Worktree:** `../todo-all-tasks-view` removed by the executor before this checkpoint.
