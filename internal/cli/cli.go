@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -94,7 +95,29 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	defer db.Close()
 
-	version, err := db.Version()
+	ctx := context.Background()
+
+	version, err := db.Version(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	want, err := store.SchemaVersion()
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	journal, err := db.JournalMode(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	pending, err := db.Count(ctx, store.Filter{})
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	total, err := db.Count(ctx, store.Filter{IncludeDone: true})
 	if err != nil {
 		fmt.Fprintf(stderr, "tdo: %v\n", err)
 		return 1
@@ -103,7 +126,13 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "tdo      %s\n", Version)
 	fmt.Fprintf(stdout, "runtime  %s %s/%s\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 	fmt.Fprintf(stdout, "database %s\n", db.Path())
-	fmt.Fprintf(stdout, "schema   %d\n", version)
+	fmt.Fprintf(stdout, "schema   %d (latest %d)\n", version, want)
+	fmt.Fprintf(stdout, "journal  %s\n", journal)
+	fmt.Fprintf(stdout, "tasks    %d pending, %d total\n", pending, total)
+	if version != want {
+		fmt.Fprintf(stderr, "tdo: database is at schema %d, want %d\n", version, want)
+		return 1
+	}
 	fmt.Fprintln(stdout, "ok")
 	return 0
 }

@@ -1,17 +1,21 @@
-// Package store owns the SQLite database. The driver is modernc.org/sqlite
-// (pure Go) so the binary builds with CGO_ENABLED=0 and links nothing.
+// Package store owns the SQLite database: the v1 schema, the migration runner
+// and every query the CLI and TUI need. The driver is modernc.org/sqlite (pure
+// Go) so the binary builds with CGO_ENABLED=0 and links nothing.
 //
-// This scaffold provides only Open plus the schema_version bookkeeping that
-// every later migration builds on; task queries belong to the store-and-
-// migrations task.
+// The store is deliberately environment-blind: it accepts task.Scope values and
+// never inspects tmux or the filesystem to work out what scope is active. That
+// is internal/scope's job.
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
 )
@@ -22,10 +26,17 @@ const AppDir = "tmux-todo"
 // DBName is the database filename inside AppDir.
 const DBName = "tasks.db"
 
+// ErrNotFound is returned when an operation names a task id that does not exist.
+var ErrNotFound = errors.New("task not found")
+
 // DB is a thin wrapper over *sql.DB carrying tmux-todo's schema helpers.
 type DB struct {
 	*sql.DB
 	path string
+
+	// now is the clock the store stamps rows with. Tests override it; callers
+	// never have to thread a time through the API.
+	now func() time.Time
 }
 
 // DefaultPath returns $XDG_DATA_HOME/tmux-todo/tasks.db, falling back to
@@ -41,9 +52,26 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".local", "share", AppDir, DBName), nil
 }
 
-// Open opens (creating if needed) the database at path, ensures the
-// schema_version table exists, and returns the handle. The parent directory is
-// created when missing.
+// dsn builds the connection string. The pragmas ride on the DSN rather than a
+// post-open Exec because database/sql pools connections: a pragma applied to
+// one connection would not reach the others.
+//
+//	journal_mode=WAL   readers never block the writer, so several open popups
+//	                   coexist. Costs the tasks.db-wal / tasks.db-shm sidecars.
+//	busy_timeout=5000  a contended writer waits instead of failing SQLITE_BUSY.
+//	foreign_keys=ON    SQLite's default is off; v1 has no FKs but later schema
+//	                   versions should not have to remember to switch it on.
+func dsn(path string) string {
+	q := url.Values{}
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(ON)")
+	return "file:" + path + "?" + q.Encode()
+}
+
+// Open opens (creating if needed) the database at path, applies the connection
+// pragmas, runs any outstanding migrations and returns the handle. The parent
+// directory is created when missing.
 func Open(path string) (*DB, error) {
 	if path == "" {
 		return nil, errors.New("store: empty database path")
@@ -51,12 +79,12 @@ func Open(path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	sqlDB, err := sql.Open("sqlite", path)
+	sqlDB, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	db := &DB{DB: sqlDB, path: path}
-	if err := db.ensureSchemaVersion(); err != nil {
+	db := &DB{DB: sqlDB, path: path, now: time.Now}
+	if err := db.migrate(context.Background()); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}
@@ -66,39 +94,22 @@ func Open(path string) (*DB, error) {
 // Path returns the file the database was opened from.
 func (db *DB) Path() string { return db.path }
 
-func (db *DB) ensureSchemaVersion() error {
-	const ddl = `CREATE TABLE IF NOT EXISTS schema_version (
-		version INTEGER NOT NULL
-	)`
-	if _, err := db.Exec(ddl); err != nil {
-		return fmt.Errorf("create schema_version: %w", err)
-	}
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM schema_version`).Scan(&n); err != nil {
-		return fmt.Errorf("count schema_version: %w", err)
-	}
-	if n == 0 {
-		if _, err := db.Exec(`INSERT INTO schema_version (version) VALUES (0)`); err != nil {
-			return fmt.Errorf("seed schema_version: %w", err)
-		}
-	}
-	return nil
-}
-
-// Version reads the recorded schema version. A fresh database reports 0; the
-// migrations task raises it as it adds tables.
-func (db *DB) Version() (int, error) {
+// Version reads the recorded schema version. A migrated database reports the
+// highest embedded migration; see SchemaVersion.
+func (db *DB) Version(ctx context.Context) (int, error) {
 	var v int
-	if err := db.QueryRow(`SELECT version FROM schema_version LIMIT 1`).Scan(&v); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT version FROM schema_version WHERE id = 1`).Scan(&v); err != nil {
 		return 0, fmt.Errorf("read schema_version: %w", err)
 	}
 	return v, nil
 }
 
-// SetVersion records the schema version.
-func (db *DB) SetVersion(v int) error {
-	if _, err := db.Exec(`UPDATE schema_version SET version = ?`, v); err != nil {
-		return fmt.Errorf("write schema_version: %w", err)
+// JournalMode reports the journal mode in effect, read back from the database
+// rather than assumed from the DSN.
+func (db *DB) JournalMode(ctx context.Context) (string, error) {
+	var mode string
+	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode); err != nil {
+		return "", fmt.Errorf("read journal_mode: %w", err)
 	}
-	return nil
+	return mode, nil
 }

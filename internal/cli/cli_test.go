@@ -2,10 +2,15 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/agusarias/tmux-todo/internal/store"
+	"github.com/agusarias/tmux-todo/internal/task"
 )
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -53,10 +58,51 @@ func TestDoctorOpensDatabase(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit code %d, want 0 (stderr: %s)", code, stderr)
 	}
-	for _, want := range []string{path, "schema   0", "ok"} {
+	latest, err := store.SchemaVersion()
+	if err != nil {
+		t.Fatalf("store.SchemaVersion: %v", err)
+	}
+	wants := []string{
+		path,
+		fmt.Sprintf("schema   %d (latest %d)", latest, latest),
+		"journal  wal",
+		"tasks    0 pending, 0 total",
+		"ok",
+	}
+	for _, want := range wants {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("doctor output missing %q:\n%s", want, stdout)
 		}
+	}
+}
+
+// TestDoctorCountsTasks exercises the whole chain from the CLI down to SQLite:
+// the store writes rows, doctor reads them back through Count.
+func TestDoctorCountsTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	ctx := context.Background()
+	pending, err := db.Add(ctx, "still open", task.Scope{Kind: task.ScopeGlobal})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := db.Add(ctx, "will be done", task.Scope{Kind: task.ScopeSession, Key: "pulsar"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := db.Complete(ctx, pending.ID+1); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	db.Close()
+
+	code, stdout, stderr := run(t, "doctor", "--db", path)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0 (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "tasks    1 pending, 2 total") {
+		t.Errorf("doctor did not report the task counts:\n%s", stdout)
 	}
 }
 

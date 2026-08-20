@@ -1,90 +1,73 @@
 package store
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // openTemp opens a real SQLite file inside the test's temp dir. No mocks: the
 // point of this package is talking to SQLite correctly.
 func openTemp(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "tasks.db"))
+	return openAt(t, filepath.Join(t.TempDir(), "tasks.db"))
+}
+
+func openAt(t *testing.T, path string) *DB {
+	t.Helper()
+	db, err := Open(path)
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("Open(%s): %v", path, err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
 }
 
-func TestOpenCreatesSchemaVersion(t *testing.T) {
+// freezeClock pins the store's clock so timestamp assertions are exact.
+func freezeClock(db *DB, at time.Time) {
+	db.now = func() time.Time { return at }
+}
+
+func TestOpenAppliesPragmas(t *testing.T) {
 	db := openTemp(t)
+	ctx := context.Background()
 
-	var name string
-	err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'`,
-	).Scan(&name)
+	mode, err := db.JournalMode(ctx)
 	if err != nil {
-		t.Fatalf("schema_version table missing: %v", err)
+		t.Fatalf("JournalMode: %v", err)
+	}
+	if mode != "wal" {
+		t.Errorf("journal_mode = %q, want wal", mode)
 	}
 
-	v, err := db.Version()
-	if err != nil {
-		t.Fatalf("Version: %v", err)
-	}
-	if v != 0 {
-		t.Errorf("fresh database reports version %d, want 0", v)
+	// busy_timeout and foreign_keys are per-connection, so this also proves the
+	// DSN pragmas reach pooled connections rather than just the first one.
+	for _, tc := range []struct{ pragma, want string }{
+		{"busy_timeout", "5000"},
+		{"foreign_keys", "1"},
+	} {
+		var got string
+		if err := db.QueryRowContext(ctx, "PRAGMA "+tc.pragma).Scan(&got); err != nil {
+			t.Fatalf("PRAGMA %s: %v", tc.pragma, err)
+		}
+		if got != tc.want {
+			t.Errorf("PRAGMA %s = %q, want %q", tc.pragma, got, tc.want)
+		}
 	}
 }
 
-func TestVersionRoundTrip(t *testing.T) {
-	db := openTemp(t)
-
-	if err := db.SetVersion(3); err != nil {
-		t.Fatalf("SetVersion: %v", err)
-	}
-	v, err := db.Version()
-	if err != nil {
-		t.Fatalf("Version: %v", err)
-	}
-	if v != 3 {
-		t.Errorf("Version = %d, want 3", v)
-	}
-}
-
-func TestOpenIsIdempotentAndPersists(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nested", "tasks.db")
-
-	db, err := Open(path)
-	if err != nil {
-		t.Fatalf("first Open: %v", err)
-	}
-	if err := db.SetVersion(7); err != nil {
-		t.Fatalf("SetVersion: %v", err)
-	}
+func TestOpenCreatesMissingDirectories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "deeper", "tasks.db")
+	db := openAt(t, path)
 	if db.Path() != path {
 		t.Errorf("Path = %q, want %q", db.Path(), path)
-	}
-	db.Close()
-
-	reopened, err := Open(path)
-	if err != nil {
-		t.Fatalf("second Open: %v", err)
-	}
-	defer reopened.Close()
-
-	v, err := reopened.Version()
-	if err != nil {
-		t.Fatalf("Version after reopen: %v", err)
-	}
-	if v != 7 {
-		t.Errorf("version after reopen = %d, want 7", v)
 	}
 }
 
 func TestOpenRejectsEmptyPath(t *testing.T) {
 	if _, err := Open(""); err == nil {
-		t.Fatal("Open(\"\") returned no error")
+		t.Fatal(`Open("") returned no error`)
 	}
 }
 
