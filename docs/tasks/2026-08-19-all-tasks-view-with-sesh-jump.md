@@ -238,6 +238,12 @@ Flip this brief to `ready` as soon as that Checkpoint 2 is approved. The plan be
 written against the merged code, not against the plan for it.
 
 ## Plan
+**Approved at Checkpoint 1 on 2026-08-20**, including the curator's re-home ruling. Held at
+`agreed` on the user's instruction until `task-create-edit-rescope` is `done`; flipping to
+`ready` is the only edit this brief needs at that point. The plan is disposable — revise the
+*how* and log why. Goal, Constraints and Definition of done are not: changing those is a
+scope event, so set `blocked` with the question instead.
+
 `internal/tui` plus a new jump executor in `internal/cli`. No `internal/store` change, no
 migration, no new module dependency.
 
