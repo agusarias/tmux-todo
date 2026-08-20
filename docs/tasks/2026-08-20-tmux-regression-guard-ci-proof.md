@@ -1,6 +1,6 @@
 # Make The Tmux Regression Guard CI-Proof
 
-**Status:** draft
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -65,3 +65,48 @@ the task; without it in Evidence this task has not been verified.
 - **2026-08-20 (curator):** the general lesson is now in CLAUDE.md — "agrees with the
   environment" is vacuous when the environment is empty. Fake the environment so the
   assertion can fail; keep the live check as a skippable leg.
+
+- **2026-08-20 (curator, triage):** **Direct path**, quick-confirmed rather than grilled.
+  All four triage axes are low: the brief was written with a full DoD and Verification
+  section when it was split out of `scope-resolution`, so there is no ambiguity left to
+  grill; it is test-only in one package; and it is trivially revertable. Running a full
+  grill on it would be the ceremony-on-a-trivial-task anti-pattern.
+- **2026-08-20 (curator, Checkpoint 1 APPROVED):** mini-plan below signed off as written.
+  Status `ready`.
+
+## Plan
+**Approach:** two-line test change plus a third verification run. No production code moves —
+`NewResolver` is already correct; only the test that guards it is vacuous.
+
+**Files:** `internal/scope/scope_test.go` only.
+
+**Steps:**
+1. `TestNewResolverCarriesTmuxEnv` sets `t.Setenv("TMUX", "/tmp/fake,1,0")` and asserts
+   `NewResolver().TmuxEnv` equals that sentinel — so the assertion has something to be
+   wrong about on a tmux-less runner, instead of comparing `"" == ""`.
+2. Add the opposite leg: with `t.Setenv("TMUX", "")`, assert `NewResolver().TmuxEnv` is `""`
+   **and** that `Resolve()` yields no session scope. Both directions of the constructor's
+   contract are then pinned, which is what stops a future refactor from satisfying one by
+   breaking the other.
+3. Leave the `tmuxAlive()`-gated live legs untouched. A faked `$TMUX` cannot prove the real
+   `display-message` call works, so that leg stays as the separate, skippable proof.
+
+**Verification — three runs, all three recorded in Evidence:**
+- inside tmux → pass
+- `env -u TMUX go test ./internal/scope/` → pass
+- `env -u TMUX` against a **mutated copy in a temp dir** (never the worktree) with
+  `NewResolver()` reverted to `return Resolver{}` → **must fail**
+
+The third run is the entire point of the task. Today it passes 30/30 with 1 skip, which is
+the vacuity being fixed; Evidence must record the before-and-after counts and the actual
+failure output, or this task has not been verified.
+
+**What could go wrong:**
+- **`t.Setenv` and parallel tests are incompatible** — `t.Setenv` forbids `t.Parallel()` in
+  the same test. If any of these tests are parallel, drop the parallelism rather than
+  reaching for a manual setenv/restore.
+- **Mutating the worktree by accident.** The third run must copy the tree to a temp dir; a
+  mutation left in the worktree would be committed.
+- **A test reaching `StickyDefault` without setting `StateDir`** falls through to the real
+  `$XDG_STATE_HOME` (`sticky.go:105-117`) and would touch the user's own state. Already a
+  Constraint; worth re-checking for the new leg since `Resolve()` is in play.
