@@ -1,6 +1,6 @@
 # SQLite Store And Migrations
 
-**Status:** review
+**Status:** done
 **Worktree:** none (removed after merge)
 
 ## Goal
@@ -199,6 +199,32 @@ side effects, no network.
   passes either way is worse than none, and the in-process test proved probabilistic: 1 of 3
   pre-fix runs, versus 3 of 3 for the upgrade test. That is why the two-process shell check
   stays part of Verification rather than being replaced by the Go test.
+
+- **2026-08-20 (curator, Checkpoint 2 round 2 — APPROVED, closed to `done`):** The race fix
+  was audited independently rather than read: the curator re-ran the two-process race (0/25 on
+  a fresh database), a four-way race (0/15), and the same command against a `git archive` of
+  the pre-fix tree at `551bf57`, which failed 7 of 25 with both documented modes
+  (`inspect schema_version: database is locked` and `table tasks already exists`). The
+  before-count differs from the executor's 11/25 because the race is probabilistic; both
+  failure modes reproducing verbatim is what makes the diagnosis and the fix credible.
+  `make test`, `go vet`, `gofmt -l`, `-race`, `-count=30` on the concurrency tests,
+  `otool -L` (no libsqlite3) and `tdo doctor` (`schema 1`, `journal wal`) were all
+  re-verified. `TestConcurrentFirstOpen` was confirmed to race a genuinely fresh file — it
+  does not repeat the DoD-9 mistake of racing an already-migrated database. All 13 DoD items
+  hold with nothing claimed-but-unproven.
+- **2026-08-20 (curator):** Four findings accepted as known rather than bounced, recorded here
+  so a later session does not rediscover them as bugs:
+  1. `ensureJournalMode` retries 50 x 20ms — a **1 second** total budget. Safe today because
+     001 is instant, but a future migration that holds the write lock longer than 1s will make
+     a concurrent opener hard-fail with `enable WAL on ...`. Treat 1s as an assumption about
+     migration duration; raise it if a migration ever gets slow.
+  2. In `applyMigrations`, a failing `COMMIT` returns the commit error and silently drops
+     `applyErr`. One-line cosmetic fix, not worth an executor pass on its own.
+  3. `TestConcurrentUpgradeAppliesOnce` calls `db.applyMigrations` directly, bypassing `Open`.
+     That is the only way to inject a fake 002, so the release-upgrade window is proven for the
+     runner but not end-to-end through `Open` (`ensureJournalMode` + migrate).
+  4. CLAUDE.md is now ~82 lines against taskflow's 60-line aim. The additions encode the exact
+     bug that shipped twice, so they stay; trim elsewhere if it keeps growing.
 
 ## Plan
 Approved at Checkpoint 1, 2026-08-19.

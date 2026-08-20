@@ -65,7 +65,11 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   already current. Tests that race an *already-migrated* database prove nothing
   about this — that was the DoD-9 gap that shipped a bug.
 - **A multi-statement `Exec` applies statements up to the first failure** and
-  leaves them there — hence the transaction around each migration.
+  leaves them there — hence the transaction around each migration. That per-file
+  unit is a `SAVEPOINT` *inside* the one outer `BEGIN IMMEDIATE`, so a failed
+  migration rolls back to its savepoint and the outer transaction still
+  **commits** — earlier migrations survive and the version tracks the last
+  success. Looks wrong at a glance; it is what makes partial upgrades sane.
 - **WAL means sidecars.** `tasks.db-wal` / `tasks.db-shm` sit beside the database
   while a connection is open; backup or sync work must account for them. A clean
   `Close` checkpoints them away.
