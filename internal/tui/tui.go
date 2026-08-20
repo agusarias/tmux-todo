@@ -75,8 +75,10 @@ type Config struct {
 	Home string
 	// Version is shown in the help overlay. It is deliberately not in the
 	// footer: stamped from `git describe --tags --always --dirty`, it is long
-	// enough to push the footer past the ~42 columns a 60%x60% popup on an
-	// 80-column terminal has, and a footer that truncates hides keybindings.
+	// enough to push the footer past the 52 columns the popup's 60 x 15 floor
+	// leaves for content (design.md), and a footer that truncates hides
+	// keybindings. footerText is 39 columns so it survives either that floor or
+	// the 42 a bare 60%x60% popup would have given.
 	Version string
 	// DefaultScope is the scope kind a new task starts on — the resolved sticky
 	// default, worked out by internal/cli, because this package must not import

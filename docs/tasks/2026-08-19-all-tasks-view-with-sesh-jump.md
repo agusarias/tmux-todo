@@ -1,6 +1,6 @@
 # All-tasks View With Sesh Jump
 
-**Status:** agreed
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -232,10 +232,13 @@ Both briefs share the `2026-08-19` date prefix and the executor claims the oldes
 task, which would sort `all-tasks-view…` **first** alphabetically — exactly the wrong order.
 Holding this at `agreed` is the curator's lever to prevent that.
 
-**Gate status:** `task-create-edit-rescope` reached `review` on 2026-08-20 (merge `dc5e73c`)
-while this brief was being planned, so the dependency is built and merged into local `main`.
-Flip this brief to `ready` as soon as that Checkpoint 2 is approved. The plan below was
-written against the merged code, not against the plan for it.
+**GATE LIFTED 2026-08-20.** `task-create-edit-rescope` was approved at Checkpoint 2 and is
+`done` (merge `dc5e73c`). Its modes, delete queue, `u`, availability cycle and `?` overlay are
+all on local `main`, so this brief is now `ready`. The plan below was written against that
+merged code, not against the plan for it — but note the line numbers it cites have shifted and
+`internal/tui/field.go` exists (the executor hand-rolled the input field, since
+`bubbles/textinput` pulls in an unvendored `atotto/clipboard`), so the input row this task
+reuses is `field`, not `textinput`.
 
 ## Plan
 **Approved at Checkpoint 1 on 2026-08-20**, including the curator's re-home ruling. Held at

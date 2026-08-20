@@ -1,6 +1,6 @@
 # Task Create, Edit And Re-scope
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged and removed)
 
 ## Goal
@@ -606,3 +606,73 @@ Two things a reviewer should look at rather than take on trust: `internal/tui/fi
 exists because of Decision 8 and is new code on the typing path, and the delete queue in
 `internal/tui/delete.go` is the critical surface.
 
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `dc5e73c` stays on local `main`; no revert, no fix-forward. `main` is
+**unpushed** — pushing remains the user's call.
+
+**Definition of done: all 21 items met.** DoD 18's `design.md` correction landed with a note
+explaining why, which is the right shape — the design doc wins over briefs, so a brief that
+contradicts it must fix it there first.
+
+**Independently re-verified by the curator on current `main`:** full suite green, `go vet`
+silent, `gofmt -l .` empty, `footerText` confirmed at 39 columns and version-free, and
+`go.mod`/`go.sum` byte-identical to before the task.
+
+**The brief was wrong about `bubbles/textinput`, and the executor was right to refuse it.**
+The Constraints section asserted as *confirmed fact* that textinput needed no `go.mod` change
+because it was "already in the module cache". The curator had verified that the package
+*directory* existed — not that its imports resolve. It imports `github.com/atotto/clipboard`,
+which is in neither `go.sum` nor the cache. Confirmed independently at this checkpoint by
+reading textinput's import block and grepping `go.sum`. The executor honoured the no-new-module
+constraint with a ~150-line in-package `field.go` rather than waiving a constraint on the
+strength of the brief's bad fact — which is the correct order of operations, since only the
+user can relax a constraint. **The lesson is generalisable and the executor already put it in
+CLAUDE.md:** a subpackage of an already-required module is not free; check the transitive
+imports. `field.go` being a pure value type also made every editing rule assertable without a
+Bubble Tea program, which the library would not have.
+
+**The mutation proof earned its place, including by finding a gap nobody was looking for.**
+The brief demanded it because DoD 11–15 assert that *nothing was written*, which is
+indistinguishable from an unimplemented delete. Two results stand out:
+
+- `u` was checked against the **rejected alternative** rather than a token mutation:
+  reimplemented as delete-then-`store.Add`, `TestUndoRestoresTheSameRowInTheSamePlace` fails
+  with `restored id = 3, want the original 2` and every row shifted. That is Decision 3's
+  reasoning reproduced as test output — the strongest form this evidence can take.
+- **One mutation came back green.** `Run` discarding `commitErr` passed, because nothing was
+  exercising `Run` at all. A real gap in the net, found only because the mutation was
+  actually run rather than assumed to fail, and now closed by
+  `TestRunReturnsTheCommitError`. This is the second time in this repo that a green test has
+  been the informative result.
+
+**The frame invariant scaled rather than being re-derived.** 648 subtests over three versions
+x nine sizes x four filters x six model states — including a 132-character title typed into
+the input row, so a field that failed to window its text would wrap and be caught. All on the
+unclamped `frame()`, with a separate assertion that the `clampHeight` backstop did not fire.
+`chromeHeight` is still 6: the input row, its hint and the `?` overlay all render inside the
+body, which was Decision 7's whole point.
+
+**The round trip the "Why" section named actually ran.** `scope.SetStickyDefault` had never
+had a caller. The pane transcript shows `sticky default written: [dir]` and the file on disk
+agreeing — so "sticky" is now a proven behaviour rather than an untested primitive.
+
+**Accepted, deliberate properties** (recorded so they are not "fixed" later): a queued row
+stays visible to a concurrent `tdo list` until the popup closes, and an unclean death commits
+nothing — both fail towards keeping the user's data. `q` in help mode dismisses the overlay
+rather than quitting, so two presses always exit; flagged at Checkpoint 1 and approved. The
+footer dropped `1/2/3 filter` as well as the version to make 39 columns; the filter keys are
+one line down in the overlay.
+
+**Curator fix at close-out:** `Config.Version`'s doc comment said the footer budget was "~42
+columns", which was the figure before `tmux-integration`'s 60 x 15 floor landed — the two
+tasks were in flight simultaneously. Corrected to 52 with the 42 noted, and `footerText`'s 39
+columns explained against both. Behaviour unchanged.
+
+**Downstream:** this task's `mode`/`viewKind` dispatch, delete queue, `u`, scope-availability
+cycle and `?` overlay are the foundation `all-tasks-view-with-sesh-jump` was planned against.
+That brief was held at `agreed` specifically to stop the executor claiming it first; with this
+task `done`, the gate is lifted and it moves to `ready`.
+
+**Worktree:** `../todo-task-create-edit-rescope` removed by the executor before this
+checkpoint.

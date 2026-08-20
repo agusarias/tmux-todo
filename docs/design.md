@@ -77,7 +77,9 @@ j/k move · space done · ? keys · q quit
 
 **The footer is a pointer, not a keymap.** An earlier version of this mock listed every key
 — 83 columns, and 93 once `j/k` and the version stamp were added — inside a popup whose own
-geometry above gives the content 42. The list would have been silently truncated from the
+geometry above gives the content 52 at the 60 x 15 floor (and 42 before that floor was
+adopted; both were measured, and the keymap overruns either). The list would have been
+silently truncated from the
 right, hiding the keys at the end. `?` opens a keymap overlay instead: it replaces the list
 body, so it costs no chrome row, and it is where the version lives too.
 
