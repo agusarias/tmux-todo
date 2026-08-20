@@ -25,7 +25,9 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - `internal/store` — SQLite: `Open` (pragmas + migrate), task CRUD, and
   `migrations/NNN_*.sql` run by `migrate.go`. Environment-blind by design: it
   takes `task.Scope` values and never asks tmux or the filesystem anything.
-- `internal/scope` — pane → scope resolution. Doc-only stub, owned by its task.
+- `internal/scope` — pane → scope resolution (`Resolver`/`Resolved`), the pure-Go
+  git root walker, and the sticky default kind. Injectable: tests need neither a
+  tmux server nor a git checkout.
 - `internal/tui` — Bubble Tea popup. Currently a placeholder model.
 - `internal/cli` — stdlib `flag` with manual subcommand dispatch.
 
@@ -47,6 +49,14 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `PurgeDone` takes an explicit cutoff — the 24h retention *policy* belongs to
   the completed-task-lifecycle task.
 - **Tests use real SQLite files in `t.TempDir()`**, never a mocked store.
+- **Scope keys are durable database keys**: absolute, cleaned, symlink-resolved,
+  never case-folded. Changing a rule after v1 ships is a data migration, so the
+  rules are pinned by tests. Git worktrees fold into their main repo (so
+  `../todo-<task>` shares the parent's list) while submodules keep their own —
+  `TestAgreesWithGitBinary` holds both to what real git reports.
+- **Absent beats empty.** Outside tmux there is no session scope rather than a
+  `""` key, and `--session` errors; the sticky default stores a *kind*, never a
+  key, in the XDG *state* dir, and a corrupt file falls back silently.
 - **Version** is stamped via `-ldflags -X .../internal/cli.Version`.
 
 ## Pitfalls
@@ -78,6 +88,12 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - The popup overlay cannot be asserted headlessly — `display-popup` needs an
   attached client. Automated checks run the TUI in a plain tmux pane
   (`tmux new-session -d … 'bin/tdo tui'` + `capture-pane`) instead.
+
+- **`t.TempDir()` is itself under a symlink on macOS** (`/var` -> `/private/var`),
+  so scope tests compare against `normalizePath(tmp)`, never the raw temp path.
+- **Resolution costs one `tmux display-message`** (~5ms of a ~5.7ms cold median),
+  one call for both formats. If the popup ever needs those milliseconds back, the
+  lever is tmux expanding `#{...}` straight into the `display-popup` command.
 
 ## Worktrees
 
