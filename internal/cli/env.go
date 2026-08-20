@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,10 +36,13 @@ type env struct {
 	err      io.Writer
 }
 
-// openEnv resolves --db (empty means the XDG data dir, as doctor does), opens
-// the store and resolves the current context. The returned func closes the
-// database; it is nil when an error is returned.
-func openEnv(dbFlag string, out, errOut io.Writer) (*env, func(), error) {
+// openStore resolves --db (empty means the XDG data dir, as doctor does) and
+// opens the database, without touching the environment. The returned func closes
+// it; it is nil when an error is returned.
+//
+// Split out of openEnv for the one command that must not resolve: see
+// runSessionRenamed.
+func openStore(dbFlag string) (*store.DB, func(), error) {
 	path := dbFlag
 	if path == "" {
 		p, err := store.DefaultPath()
@@ -51,14 +55,29 @@ func openEnv(dbFlag string, out, errOut io.Writer) (*env, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	return db, func() { db.Close() }, nil
+}
+
+// openEnv opens the store and resolves the current context.
+//
+// It also refreshes the session_id -> name map, which is why every ordinary
+// command goes through here: the map is only useful if it is fresh, and the
+// cheapest way to keep it fresh is to write it wherever a session scope was
+// resolved anyway. recordSession never fails the command.
+func openEnv(dbFlag string, out, errOut io.Writer) (*env, func(), error) {
+	db, closeDB, err := openStore(dbFlag)
+	if err != nil {
+		return nil, nil, err
+	}
 	resolver := newResolver()
 	resolved, err := resolver.Resolve()
 	if err != nil {
-		db.Close()
+		closeDB()
 		return nil, nil, err
 	}
+	recordSession(context.Background(), db, resolved)
 	e := &env{db: db, resolver: resolver, scopes: resolved, out: out, err: errOut}
-	return e, func() { db.Close() }, nil
+	return e, closeDB, nil
 }
 
 // scopeAll is the --scope value that escapes the active set: every scope in the

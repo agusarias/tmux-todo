@@ -35,7 +35,9 @@ A task has exactly one scope. The three are orthogonal; none is nested inside an
 ### Session renames and stale names
 
 - A tmux `session-renamed` hook (installed by the TPM plugin) rewrites the scope key so
-  tasks follow the rename.
+  tasks follow the rename. tmux does not tell the hook the *old* name, so this needs a
+  durable `session_id -> name` map (v2 `sessions` table): the id survives a rename, the
+  name does not. The hook therefore takes **no argument** — see the note under Storage.
 - The hook is best-effort. Sessions also die for reasons other than renames, so the
   all-tasks view must still list **non-running session groups** and let you re-home or
   delete them.
@@ -44,9 +46,18 @@ A task has exactly one scope. The three are orthogonal; none is nested inside an
 
 ## Popup UX
 
-Opened via `tmux display-popup -E`, ~60% × 60%, centered. **Stays open** across actions —
-toggle several tasks, add two more, delete one, all in one popup. `Esc` / `q` closes.
-The only action that closes it is jumping to another session from the all-tasks view.
+Opened via `tmux display-popup -E`, ~60% × 60%, centered, **floored at 60 × 15**.
+**Stays open** across actions — toggle several tasks, add two more, delete one, all in one
+popup. `Esc` / `q` closes. The only action that closes it is jumping to another session
+from the all-tasks view.
+
+The floor is a measured refinement of the percentage, not a contradiction of it: 60% of a
+standard 80×24 terminal is 48×14, which leaves the TUI a 46×12 pane — below the 58 columns
+the footer needs and near the bottom of the range the frame invariant is asserted over.
+60 × 15 gives it 58×13. Above 100 × 25 the percentage governs and the floor never applies.
+`display-popup` does not expand formats in `-w`/`-h`, so the keybind picks the size with
+`if-shell` rather than an expression; the exact commands are in
+`docs/tasks/2026-08-19-tmux-integration-and-rename-hook.md`.
 
 ### Default view
 
@@ -131,7 +142,13 @@ model later is an `ALTER`, not a rewrite.
 ```sql
 -- v1
 tasks(id, text, done, done_at, scope_kind, scope_key, created_at)
+-- v2
+sessions(session_id, name, updated_at)
 ```
+
+`sessions` is the tmux `session_id -> name` map the rename hook reads. It is written
+wherever a session scope is resolved, and a failed write never fails the command: a stale
+map costs one unrecovered rename, which the all-tasks view can re-home.
 
 Deliberately **not** in v1: priority, due dates, tags, notes, subtasks. The schema must
 tolerate adding them.
