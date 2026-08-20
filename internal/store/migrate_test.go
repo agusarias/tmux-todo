@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/agusarias/tmux-todo/internal/task"
@@ -267,5 +268,144 @@ func TestLoadMigrationsIsOrdered(t *testing.T) {
 		if i > 0 && migs[i-1].version >= migs[i].version {
 			t.Errorf("migrations out of order: %s before %s", migs[i-1], migs[i])
 		}
+	}
+}
+
+// TestConcurrentFirstOpen is DoD 13: several processes opening the same brand
+// new database must all succeed. This is the case DoD 9 misses — that test races
+// two handles against a database the first Open already migrated, so the
+// migration itself never runs concurrently.
+func TestConcurrentFirstOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	const openers = 8
+
+	start := make(chan struct{})
+	errs := make(chan error, openers)
+	dbs := make(chan *DB, openers)
+	var wg sync.WaitGroup
+
+	for i := 0; i < openers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release them together, to actually contend
+			db, err := Open(path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			dbs <- db
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	close(dbs)
+
+	for err := range errs {
+		t.Errorf("concurrent first Open failed: %v", err)
+	}
+
+	ctx := context.Background()
+	latest, err := SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	var opened int
+	for db := range dbs {
+		opened++
+		v, err := db.Version(ctx)
+		if err != nil {
+			t.Errorf("Version: %v", err)
+		}
+		if v != latest {
+			t.Errorf("version = %d, want %d", v, latest)
+		}
+		db.Close()
+	}
+	if opened != openers {
+		t.Errorf("%d of %d openers succeeded", opened, openers)
+	}
+}
+
+// TestConcurrentUpgradeAppliesOnce covers the other window DoD 13 names: the
+// first opens after a release that adds 002_*.sql. Several handles race to apply
+// the same new migration; exactly one may win, and the losers must skip it
+// rather than collide with its DDL.
+func TestConcurrentUpgradeAppliesOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	ctx := context.Background()
+
+	const handles = 4
+	dbs := make([]*DB, handles)
+	for i := range dbs {
+		dbs[i] = openAt(t, path)
+	}
+
+	base, err := SchemaVersion()
+	if err != nil {
+		t.Fatalf("SchemaVersion: %v", err)
+	}
+	next := []migration{{
+		version: base + 1,
+		name:    "add_widgets",
+		sql:     `CREATE TABLE widgets (id INTEGER PRIMARY KEY, label TEXT NOT NULL);`,
+	}}
+
+	start := make(chan struct{})
+	errs := make(chan error, handles)
+	var wg sync.WaitGroup
+	for _, db := range dbs {
+		wg.Add(1)
+		go func(db *DB) {
+			defer wg.Done()
+			<-start
+			if err := db.applyMigrations(ctx, next); err != nil {
+				errs <- err
+			}
+		}(db)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent upgrade failed: %v", err)
+	}
+
+	v, err := dbs[0].Version(ctx)
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if v != base+1 {
+		t.Errorf("version = %d, want %d", v, base+1)
+	}
+	var tables int
+	if err := dbs[0].QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'widgets'`).Scan(&tables); err != nil {
+		t.Fatalf("inspect sqlite_master: %v", err)
+	}
+	if tables != 1 {
+		t.Errorf("widgets table count = %d, want 1", tables)
+	}
+}
+
+// TestDSNCarriesConnectionPragmasOnly pins the split that makes concurrent first
+// open safe: per-connection settings belong on the DSN, but journal_mode is a
+// property of the file and must not be re-requested by every pooled connection —
+// SQLite answers that with SQLITE_BUSY without consulting busy_timeout.
+func TestDSNCarriesConnectionPragmasOnly(t *testing.T) {
+	got := dsn("/tmp/example/tasks.db")
+	busy := strings.Index(got, "busy_timeout")
+	if busy < 0 {
+		t.Fatalf("dsn is missing busy_timeout: %s", got)
+	}
+	if fk := strings.Index(got, "foreign_keys"); fk < 0 {
+		t.Fatalf("dsn is missing foreign_keys: %s", got)
+	} else if busy > fk {
+		t.Errorf("busy_timeout should come first so the wait is in force: %s", got)
+	}
+	if strings.Contains(got, "journal_mode") {
+		t.Errorf("journal_mode must not be a DSN pragma, it is set once in Open: %s", got)
 	}
 }

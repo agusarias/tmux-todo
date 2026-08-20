@@ -51,9 +51,19 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 
 ## Pitfalls
 
-- **Pragmas ride on the DSN** (`?_pragma=busy_timeout(5000)&...`), not a
-  post-open `Exec`: `database/sql` pools connections, so an `Exec`-applied
+- **Per-connection pragmas ride on the DSN** (`?_pragma=busy_timeout(5000)&...`),
+  not a post-open `Exec`: `database/sql` pools connections, so an `Exec`-applied
   pragma reaches one connection and silently misses the rest.
+- **`journal_mode` is the exception and must NOT be a DSN pragma.** It is a
+  property of the file, and SQLite refuses to change it while another connection
+  is reading — answering `SQLITE_BUSY` *without* consulting `busy_timeout`. On
+  the DSN it fires on every new pooled connection, so concurrent first opens
+  fail outright. `Open` calls `ensureJournalMode` once, with a retry.
+- **Concurrent first open is the dangerous window**, not steady state: the
+  migration runner holds one `BEGIN IMMEDIATE` transaction across the version
+  read and the apply loop, so the losing process waits and then sees the version
+  already current. Tests that race an *already-migrated* database prove nothing
+  about this — that was the DoD-9 gap that shipped a bug.
 - **A multi-statement `Exec` applies statements up to the first failure** and
   leaves them there — hence the transaction around each migration.
 - **WAL means sidecars.** `tasks.db-wal` / `tasks.db-shm` sit beside the database

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, registered as "sqlite"
@@ -52,21 +53,77 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".local", "share", AppDir, DBName), nil
 }
 
-// dsn builds the connection string. The pragmas ride on the DSN rather than a
-// post-open Exec because database/sql pools connections: a pragma applied to
-// one connection would not reach the others.
+// journalWAL is the journal mode the store requires.
+const journalWAL = "wal"
+
+// dsn builds the connection string. These pragmas ride on the DSN because
+// database/sql pools connections and they are per-connection settings: applied
+// with a post-open Exec they would reach one connection and miss the others.
 //
-//	journal_mode=WAL   readers never block the writer, so several open popups
-//	                   coexist. Costs the tasks.db-wal / tasks.db-shm sidecars.
-//	busy_timeout=5000  a contended writer waits instead of failing SQLITE_BUSY.
+//	busy_timeout=5000  a contended connection waits instead of failing
+//	                   SQLITE_BUSY. First on purpose, so the wait is in force
+//	                   before anything else touches the file.
 //	foreign_keys=ON    SQLite's default is off; v1 has no FKs but later schema
 //	                   versions should not have to remember to switch it on.
+//
+// journal_mode is deliberately NOT here — see ensureJournalMode.
 func dsn(path string) string {
-	q := url.Values{}
-	q.Add("_pragma", "journal_mode(WAL)")
-	q.Add("_pragma", "busy_timeout(5000)")
-	q.Add("_pragma", "foreign_keys(ON)")
-	return "file:" + path + "?" + q.Encode()
+	pragmas := []string{
+		"busy_timeout(5000)",
+		"foreign_keys(ON)",
+	}
+	// Built by hand rather than with url.Values.Encode: the order matters and
+	// Encode makes no promise about preserving it.
+	q := make([]string, 0, len(pragmas))
+	for _, p := range pragmas {
+		q = append(q, "_pragma="+url.QueryEscape(p))
+	}
+	return "file:" + path + "?" + strings.Join(q, "&")
+}
+
+// ensureJournalMode puts the database in WAL, retrying while another connection
+// is in the way.
+//
+// WAL is a persistent property of the file, not of a connection, so it is set
+// once here instead of on the DSN. That is not a style choice: SQLite refuses a
+// journal_mode change while another connection is reading and answers
+// SQLITE_BUSY *without* consulting busy_timeout, so as a DSN pragma it fires on
+// every new pooled connection and turns concurrent first opens into hard
+// failures. Setting it here means the second process usually finds WAL already
+// in place and never asks.
+func (db *DB) ensureJournalMode(ctx context.Context) error {
+	const (
+		attempts = 50
+		backoff  = 20 * time.Millisecond
+	)
+
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		mode, err := db.JournalMode(ctx)
+		if err != nil {
+			return err
+		}
+		if mode == journalWAL {
+			return nil
+		}
+
+		var got string
+		switch err := db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&got); {
+		case err != nil:
+			lastErr = err
+		case got == journalWAL:
+			return nil
+		default:
+			lastErr = fmt.Errorf("journal_mode is %q after requesting %s", got, journalWAL)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
+	return fmt.Errorf("enable WAL on %s: %w", db.path, lastErr)
 }
 
 // Open opens (creating if needed) the database at path, applies the connection
@@ -84,7 +141,12 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	db := &DB{DB: sqlDB, path: path, now: time.Now}
-	if err := db.migrate(context.Background()); err != nil {
+	ctx := context.Background()
+	if err := db.ensureJournalMode(ctx); err != nil {
+		sqlDB.Close()
+		return nil, err
+	}
+	if err := db.migrate(ctx); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}
@@ -97,11 +159,7 @@ func (db *DB) Path() string { return db.path }
 // Version reads the recorded schema version. A migrated database reports the
 // highest embedded migration; see SchemaVersion.
 func (db *DB) Version(ctx context.Context) (int, error) {
-	var v int
-	if err := db.QueryRowContext(ctx, `SELECT version FROM schema_version WHERE id = 1`).Scan(&v); err != nil {
-		return 0, fmt.Errorf("read schema_version: %w", err)
-	}
-	return v, nil
+	return readVersion(ctx, db.DB)
 }
 
 // JournalMode reports the journal mode in effect, read back from the database
