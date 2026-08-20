@@ -220,6 +220,32 @@ under the existing `bubbles v1.0.0` require (no `go.mod` change), and `tui.go:97
 seam plus `render.go`'s pure `glyph`/`scopeLabel`/`columns`/`renderRow` helpers are directly
 reusable for the input row.
 
+### 2026-08-20 (executor) — three decisions taken during execution
+
+8. **`bubbles/textinput` was not usable, so `internal/tui/field.go` is a hand-rolled
+   one-line editor.** The plan recorded, as confirmed fact, that textinput was "already in
+   the module cache under the existing `bubbles v1.0.0` require (no `go.mod` change)". It is
+   not: textinput imports `github.com/atotto/clipboard`, which is in neither `go.sum` nor
+   the module cache and does not resolve with `GOPROXY=off`. Using it would have meant a new
+   module in the build graph — the one thing the Constraints rule out. Rather than
+   renegotiate the constraint for a field that needs no clipboard, placeholder, suggestions
+   or validation, the ~150 lines that remain are in-package. They are a pure value type, so
+   every editing rule is assertable without a Bubble Tea program (`field_test.go`), and
+   `go.mod`/`go.sum` are byte-identical to `main`. The constraint was honoured, not waived.
+9. **The footer dropped `1/2/3 filter` as well as the version.** DoD 17's budget is 42
+   columns. `1/2/3 filter · j/k move · space done · ? keys · q quit` is 54; the four keys a
+   first-time user needs — move, complete, help, quit — come to exactly 39. The filter keys
+   are one line down in the `?` overlay. This is the plan's own arithmetic ("39 without
+   it"), made explicit here because it means one advertised key moved rather than only the
+   version.
+10. **`Run` gained a `run(m, opts...)` seam so its error path is actually tested.** The first
+    mutation run showed "Run drops commitErr" passing — nothing exercised `Run` at all,
+    because it opens a terminal. `run` takes program options, so `TestRunReturnsTheCommitError`
+    drives the real event loop with a scripted `q` and no renderer. Without it, the DoD 14
+    clause "and `Run` returns any commit error" rested on inspection, which CLAUDE.md says
+    has already shipped two bugs.
+
+
 ## Plan
 **Approved at Checkpoint 1 on 2026-08-20** as written below, including DoD 18's correction to
 `design.md:62`. The plan is disposable: revise the *how* freely and log why in Decisions. The
@@ -319,4 +345,259 @@ the file is small enough to reason about.
   and CLAUDE.md's three shipped bugs say it gets its own careful pass, not a `+1`.
 
 ## Evidence
-(Added by the executor.)
+
+From the worktree `../todo-task-create-edit-rescope`, go1.26.6, tmux 3.7b, macOS arm64.
+
+### Sweep (DoD 20)
+
+```
+$ git diff --stat go.mod go.sum
+(no output — no new module dependency; see Decision 8)
+$ make test
+ok  github.com/agusarias/tmux-todo/internal/cli    0.926s
+ok  github.com/agusarias/tmux-todo/internal/scope  0.966s
+ok  github.com/agusarias/tmux-todo/internal/store  (cached)
+ok  github.com/agusarias/tmux-todo/internal/task   (cached)
+ok  github.com/agusarias/tmux-todo/internal/tui    (cached)
+$ make lint          # go vet ./... + gofmt -l .
+lint clean
+$ gofmt -l .
+(empty)
+$ go test ./... -count=1 -race
+(all ok — internal/tui 24.5s, the frame matrix is 648 subtests)
+$ CGO_ENABLED=0 make build && otool -L bin/tdo
+bin/tdo:
+    /usr/lib/libSystem.B.dylib
+    /usr/lib/libresolv.9.dylib        # no libsqlite3
+```
+
+918 test runs in total, up from 315.
+
+### The mutation proof the brief asked for
+
+DoD 11–15 are mostly assertions that *nothing was written*, which is also what a completely
+unimplemented delete looks like. So the commit call was deleted and the test re-run:
+
+```
+$ # quit() returns tea.Quit instead of m.commitDeletesCmd()
+$ go test ./internal/tui/ -run TestCommitOnExitDeletesForReal
+--- FAIL: TestCommitOnExitDeletesForReal (0.01s)
+    --- FAIL: TestCommitOnExitDeletesForReal/q (0.01s)
+        delete_test.go:234: store holds [keep me delete me], want only the kept task
+    --- FAIL: TestCommitOnExitDeletesForReal/esc (0.00s)
+        delete_test.go:234: store holds [keep me delete me], want only the kept task
+    --- FAIL: TestCommitOnExitDeletesForReal/ctrl+c (0.00s)
+        delete_test.go:234: store holds [keep me delete me], want only the kept task
+FAIL
+```
+
+And the undo test was checked against the *rejected alternative* rather than a token
+mutation — `u` reimplemented as delete-then-`store.Add`, which is the design Decision 3
+turned down:
+
+```
+--- FAIL: TestUndoRestoresTheSameRowInTheSamePlace (0.01s)
+    delete_test.go:113: row 0 is id 5, want 4 — the list is not as it was
+    delete_test.go:113: row 1 is id 4, want 3 — the list is not as it was
+    delete_test.go:113: row 2 is id 3, want 2 — the list is not as it was
+    delete_test.go:118: restored id = 3, want the original 2
+    delete_test.go:124: cursor = 0, want it back on the restored row at 2
+```
+
+That is Decision 3's reasoning reproduced as output: re-inserting gives the task a new id
+and moves it from position 2 to the top of its tier.
+
+Every other new guard was checked the same way. Each mutation was applied alone and the
+named test re-run; all failed, and were restored afterwards:
+
+| mutation | test that failed |
+|---|---|
+| `quit()` never commits | `TestCommitOnExitDeletesForReal` |
+| `u` re-inserts instead of un-hiding | `TestUndoRestoresTheSameRowInTheSamePlace` |
+| `dropQueued` not applied in the `rowsMsg` handler | `TestQueuedRowStaysGoneAcrossReloads` |
+| `d` deletes immediately instead of queueing | `TestDeleteQueuesWithoutWriting`, `TestDyingWithoutCommittingKeepsTheTasks` |
+| `Run` discards `commitErr` | `TestRunReturnsTheCommitError` |
+| `Tab` offers every scope kind, not just available ones | `TestTabCyclesOnlyAvailableScopes` |
+| empty `Enter` blanks the task on edit | `TestEditRejectsEmptyText` |
+| input mode dispatched to `updateNormal` | `TestInputModeTakesCommandKeysAsText` |
+| `s` also writes the sticky default | `TestRescopeCyclesInPlace` |
+| the footer keeps the version | `TestFooterSurvivesTheNarrowestPopup` |
+
+The first `Run` mutation came back **passing**, which is what produced Decision 10: nothing
+was exercising `Run`. The gap was real and is now closed.
+
+### The frame invariant, extended (Verification)
+
+`TestFrameNeverExceedsThePane` now runs its 3 versions x 9 sizes x 4 filters over six model
+states — normal, adding (with a 132-character title typed into the row, so a field that
+failed to window its text would wrap), editing, a rejected edit showing its hint, the help
+overlay, and a list emptied entirely by `d`. 648 subtests, all asserting on the **unclamped**
+`frame()` and separately asserting that the `clampHeight` backstop did *not* fire.
+
+`chromeHeight` is still 6. The input row, its hint and the overlay all render inside the
+body.
+
+### Headless tests, by DoD item
+
+```
+$ go test ./internal/tui/ -v    (abridged to the items the brief names)
+--- PASS: TestTabCyclesOnlyAvailableScopes/all_three
+--- PASS: TestTabCyclesOnlyAvailableScopes/outside_tmux
+--- PASS: TestTabCyclesOnlyAvailableScopes/no_directory
+--- PASS: TestTabCyclesOnlyAvailableScopes/global_only_—_tab_is_a_no-op,_not_a_trap
+--- PASS: TestUndoRestoresTheSameRowInTheSamePlace        (DoD 12: id, created_at, position)
+--- PASS: TestQueuedRowStaysGoneAcrossReloads             (DoD 13: 4 kinds of reload)
+--- PASS: TestCommitOnExitDeletesForReal/q|esc|ctrl+c     (DoD 14)
+--- PASS: TestEmptyQueueExitsExactlyAsBefore              (DoD 14, second clause)
+--- PASS: TestDyingWithoutCommittingKeepsTheTasks         (DoD 15)
+--- PASS: TestInputModeTakesCommandKeysAsText             (DoD 19)
+--- PASS: TestFooterSurvivesTheNarrowestPopup             (DoD 17)
+--- PASS: TestHelpOverlayFitsTheNarrowestPopup
+--- PASS: TestStickyFailureDoesNotFailTheAdd              (DoD 5)
+--- PASS: TestRescopeOutOfAFilteredTierClampsTheCursor    (DoD 10)
+```
+
+`TestQueuedRowStaysGoneAcrossReloads` covers the case the DoD singles out — another pane
+inserting a row mid-popup — and then walks the cursor the length of the list to prove the
+queued row cannot be reached, not merely that it is not rendered.
+
+### In a real tmux pane (DoD 21)
+
+58x13 is the pane a floored 60x15 `display-popup` hands the TUI, so this is the shipped
+geometry. `$XDG_DATA_HOME` and `$XDG_STATE_HOME` both point at temp dirs; the real database
+and the real sticky default were not touched.
+
+`a`, then typing — the input row is a row *in the list*, on the seeded scope:
+
+```
+╭────────────────────────────────────────────────────────╮
+│  tdo                                                   │
+│                                                        │
+│  ▸ ⌘ write the release notes                           │
+│    ⌘ rebase onto main                   (session: ui)  │
+│    ⌘ check CI                                          │
+│    ◉ call the dentist                   (global)       │
+│                                                        │
+│  j/k move · space done · ? keys · q quit               │
+╰────────────────────────────────────────────────────────╯
+```
+
+`tab` cycles the glyph (⌘ session → · dir), `enter` saves and the cursor lands on the new
+row:
+
+```
+│    ⌘ rebase onto main         (session: ui)            │
+│    ⌘ check CI                                          │
+│  ▸ · write the release notes  (dir: ~/workspace/todo)  │
+│    ◉ call the dentist         (global)                 │
+
+  store now: 1=session:rebase onto main 2=session:check CI
+             3=global:call the dentist 4=dir:write the release notes
+  sticky default written: [dir]
+```
+
+That last line is the round trip the brief's "Why" section calls out: `SetStickyDefault` had
+never had a caller, and the file on disk now says `dir`.
+
+`?` — the overlay replaces the list body, and carries the version:
+
+```
+╭────────────────────────────────────────────────────────╮
+│  tdo                                                   │
+│                                                        │
+│  j/k move · space done · q quit                        │
+│  a add · e edit · s re-scope                           │
+│  d delete · u undo (until close)                       │
+│  1/2/3 filter tier · tab scope (add)                   │
+│  ? or esc closes this                                  │
+│  v0d55256-dirty                                        │
+│                                                        │
+│  j/k move · space done · ? keys · q quit               │
+╰────────────────────────────────────────────────────────╯
+```
+
+`d` then `u`, with the store checked in between:
+
+```
+--- d — the row leaves the view ---
+│    ⌘ rebase onto main         (session: ui)            │
+│  ▸ · write the release notes  (dir: ~/workspace/todo)  │
+│    ◉ call the dentist         (global)                 │
+  still in the database: 1 row
+--- u — back at the same position ---
+│    ⌘ rebase onto main         (session: ui)            │
+│  ▸ ⌘ check CI                                          │
+│    · write the release notes  (dir: ~/workspace/todo)  │
+│    ◉ call the dentist         (global)                 │
+  its id is still: 2
+```
+
+Then `d` again and `q`. The end-to-end state the Verification section asks for — added in a
+chosen scope, edited, deleted, undone, deleted, committed on exit:
+
+```
+--- after q: what the commit actually did ---
+  1 session done=0 rebase onto main
+  3 global  done=0 call the dentist
+  4 dir     done=0 write the release notes
+--- and what the shell sees ---
+  4 [ ] dir:~/workspace/todo  write the release notes
+  3 [ ] global                call the dentist
+```
+
+Id 2 is gone (it was queued twice and undone once, so the second `d` committed); ids 1, 3
+and 4 survive, and id 4 — the task added through the popup — has the id and scope it was
+given. The undone row kept id 2 throughout.
+
+**The styling ships.** `capture-pane -pe` after completing a row, escapes made visible:
+
+```
+│  ▸ ◉ ^[[2;9mrebase^[[0;9m ^[[2monto^[[0;9m ^[[2mmain^[[0m       ^[[2m(global)^[[0m  │
+```
+
+`ESC[9m` is crossed-out and `ESC[2m` faint, which is `doneStyle`. Worth recording: those
+escapes sit *between the words*, so grepping a styled capture for a multi-word phrase finds
+nothing even though the phrase is on screen — an empty grep there is a capture artifact, not
+a missing row. Noted in CLAUDE.md.
+
+### Definition of done
+
+1. ✅ input row at the top of the list, inside the viewport; `chromeHeight` still 6 and the
+   frame invariant extended to this mode.
+2. ✅ `TestTabCyclesOnlyAvailableScopes`, a case per available-scope combination, driven off
+   `Config.Scopes` alone.
+3. ✅ trims, inserts, closes, reloads, cursor on the new task, `SetSticky` called — asserted
+   together in `TestAddSavesTrimsAnchorsAndRemembers`, and visible in the pane transcript.
+4. ✅ empty and whitespace-only `Enter` cancel, `Esc` cancels, neither calls `SetSticky`.
+5. ✅ `TestStickyFailureDoesNotFailTheAdd`, with an injected failing writer.
+6. ✅ pre-filled, cursor at the end, saves via `UpdateText`, re-anchors.
+7. ✅ rejected with a hint that is on screen and clears when the user types; the task is not
+   blanked; `Esc` leaves it unchanged.
+8. ✅ `Tab` inert in edit mode, and it does not type a tab character either.
+9. ✅ same cycle, applied immediately, re-anchored, sticky default untouched.
+10. ✅ `TestRescopeOutOfAFilteredTierClampsTheCursor`.
+11. ✅ no `DELETE` before close; id, text, scope, done state and `created_at` all verified
+    unchanged in the store while queued.
+12. ✅ id, `created_at`, list position and cursor all restored; LIFO; empty-queue `u` inert.
+13. ✅ filtered in the `rowsMsg` handler — one point, every reload — and proven against four
+    kinds of reload including another pane's insert.
+14. ✅ commits before exit on all three quit keys, `Run` returns the error, and an empty
+    queue still goes straight to `tea.Quit` with no command in between.
+15. ✅ `TestDyingWithoutCommittingKeepsTheTasks` drops the model without running the quit
+    path.
+16. ✅ `?` overlay replaces the body, clipped to `listHeight`, each line truncated; `?`/`esc`/`q`
+    dismiss; mutation keys inert behind it.
+17. ✅ one row, 39 columns, untruncated at `contentWidth` 42 for every version stamp
+    including a `-dirty` `git describe` — asserted, not measured by eye. See Decision 9 for
+    what moved.
+18. ✅ `docs/design.md`'s footer mock corrected, with a note on why; the `Creating and
+    editing` and `d` bullets updated to match what ships.
+19. ✅ `TestInputModeTakesCommandKeysAsText` types `q j k d u ? 1 2 3 s e a` into the row and
+    asserts every one of them landed as text.
+20. ✅ tests, vet, gofmt, static build, `otool -L`.
+21. ✅ above.
+
+Two things a reviewer should look at rather than take on trust: `internal/tui/field.go`
+exists because of Decision 8 and is new code on the typing path, and the delete queue in
+`internal/tui/delete.go` is the critical surface.
+

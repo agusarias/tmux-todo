@@ -33,6 +33,9 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `internal/cli` and never resolves a scope or reads the clock itself, so
   `Update`/`View` are testable without tmux. Row formatting lives in `render.go`
   as pure functions.
+- `internal/tui` also holds the input row (`input.go`, `field.go`) and the deferred
+  delete queue (`delete.go`). Both are pure model state; the only I/O either does is a
+  store command returned from `Update`.
 - `internal/cli` — stdlib `flag` with manual subcommand dispatch. Also owns the two
   tmux-facing side jobs: refreshing the `session_id -> name` map on every resolve
   (`openEnv`) and the `session-renamed` subcommand the tmux hook calls.
@@ -69,7 +72,19 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   and HTML escaping off so task prose survives as itself. `internal/cli/json.go`
   is that contract alone, pinned bytewise by `testdata/list.json`. Cosmetic churn
   there is a breaking change for anyone's script.
-- **Version** is stamped via `-ldflags -X .../internal/cli.Version`.
+- **Version** is stamped via `-ldflags -X .../internal/cli.Version`. It lives in the popup's
+  `?` overlay, **not** the footer: the footer has 42 columns in the design's own popup, and a
+  `git describe` stamp plus a keymap does not fit — truncation would eat the keys silently.
+- **`d` in the popup queues; the DELETE runs at close.** `u` un-hides rather than
+  re-inserts, which is the only way the row comes back with its original id, timestamp and
+  position (`store.Add` would assign new ones and move it to the top of its tier). The costs
+  are deliberate: a queued row is still visible to a concurrent `tdo list`, and an unclean
+  death commits nothing. Both fail towards keeping the user's data.
+- **`bubbles/textinput` is not free even though `bubbles` is already required.** It imports
+  `github.com/atotto/clipboard`, which is in neither `go.sum` nor the module cache, so using
+  it means a new module in the build graph. `internal/tui/field.go` is a ~150-line one-line
+  editor instead. Check the *transitive* imports before assuming a subpackage of an existing
+  dependency is a free upgrade.
 - **The session scope key is the session *name*, so renames need a map.** tmux gives a
   `session-renamed` hook only the *new* name; the old one — the key the tasks are filed
   under — is already gone. The `session_id` survives the rename, so v2's `sessions` table
@@ -161,6 +176,11 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   a label sized from "whatever width is left" gets no width at all. `columns()`
   guarantees labels a share and left-truncates them (the path *tail* identifies
   it); `TestRowsNeverExceedTheirWidth` holds every row to its budget.
+- **`capture-pane -pe` interleaves escapes *between words*.** A styled row comes back as
+  `^[[2;9mrebase^[[0;9m ^[[2monto^[[0;9m ^[[2mmain^[[0m`, so grepping the capture for a
+  multi-word phrase finds nothing even though the phrase is on screen. Grep for one word, or
+  for the escape itself (`[9m` is strikethrough). An empty grep here is a capture artifact,
+  not a missing row — it cost half an hour once.
 - **lipgloss styles render to plain text in tests** — a test process has no colour
   profile, so asserting on rendered ANSI passes whatever style was chosen. Assert
   on the style object instead (`textStyle(...).GetStrikethrough()`) and prove the

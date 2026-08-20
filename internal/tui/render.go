@@ -296,3 +296,30 @@ func renderRow(t task.Task, label string, selected bool, cols layout) string {
 	b.WriteString(labelStyle.Render(truncateLeft(label, cols.label)))
 	return b.String()
 }
+
+// helpLines is the keymap overlay's content: every key this build binds, plus
+// the running version.
+//
+// It exists because the footer cannot hold this. Eleven keys and a
+// `git describe` version stamp come to well over the ~42 columns a 60%x60%
+// popup on an 80-column terminal has, and the footer's truncation would have
+// dropped the last keys silently — which is exactly what docs/design.md's own
+// footer mock specified. Every line here is kept under 42 columns so the overlay
+// renders whole at the same size; the caller still truncates, but at that width
+// it has nothing to do.
+//
+// A pure function of the version so its width is directly assertable, in the
+// same spirit as the rest of this file.
+func helpLines(version string) []string {
+	lines := []string{
+		"j/k move · space done · q quit",
+		"a add · e edit · s re-scope",
+		"d delete · u undo (until close)",
+		"1/2/3 filter tier · tab scope (add)",
+		"? or esc closes this",
+	}
+	if version != "" {
+		lines = append(lines, "v"+version)
+	}
+	return lines
+}
