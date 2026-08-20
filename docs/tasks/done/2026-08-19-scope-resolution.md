@@ -1,6 +1,6 @@
 # Scope Resolution
 
-**Status:** review
+**Status:** done
 **Worktree:** none (removed after merge)
 
 ## Goal
@@ -574,3 +574,35 @@ resolver. Items 1–2 and 4–11 were already met and are unchanged by this pass
 - The `display-popup` overlay itself, which needs an attached client (CLAUDE.md). The
   end-to-end check above runs the TUI in a plain tmux pane instead.
 
+## Close-out (curator, 2026-08-20)
+
+**Approved at Checkpoint 2 on the second attempt.** All 11 Definition-of-done items
+checked against code, not against the Evidence's word:
+
+1-3 resolution shape, pane-path-then-getwd fallback, and the one-call `display-message`
+format — `scope.go:50-57`, `:74-97`, `:102-120`. 4-6 the git walker, `.git`-file and
+`worktrees/` handling, and `normalizePath`'s Abs → EvalSymlinks → Clean with no
+case-folding — `git.go:38-74`, `:106-135`. 7 `TestAgreesWithGitBinary` confirmed **running,
+not skipping** (`--- PASS … 0.38s`). 8-9 sticky default in the XDG *state* dir with
+temp+rename write, tolerant read, and `degrade` over `rs.Has` — `sticky.go:39-46`,
+`:51-65`, `:70-100`, `:105-117`. 10 `make test` / `go vet` / `gofmt -l` clean and
+`otool -L` free of libsqlite3. 11 resolution timed at 5.13ms against the ~10ms budget.
+
+**The rejected defect is fixed at the right seam** and independently verified two ways:
+a mutation reverting `NewResolver()` to `Resolver{}` fails four committed tests inside
+tmux with the exact quoted messages, and an end-to-end `capture-pane` of the shipped
+binary shows a session-scoped task rendering with its tier label — the first time session
+scope has reached the product.
+
+**Accepted with a known gap, tracked separately.** `TestNewResolverCarriesTmuxEnv`
+compares `NewResolver().TmuxEnv` against `os.Getenv("TMUX")`, which is `"" == ""` outside
+tmux — so the whole regression net is vacuous on a tmux-less CI runner, where the mutated
+copy passes 30/30. Not worth re-opening a twice-merged task whose actual defect is fixed;
+split out as its own draft (`make-the-tmux-regression-guard-ci-proof`). The Evidence's
+"the default cannot regress behind a refactor" is an overclaim until that lands: it holds
+only on a machine inside tmux.
+
+**Structural residual, deliberately kept.** `Resolver`'s zero value stays tmux-blind and
+`scope_test.go:341-345` pins that on purpose. The only guard against the next caller is
+the doc comment at `scope.go:27-36`. `cli-surface` is that next caller, and the hazard is
+written into its brief under "Blocked on".

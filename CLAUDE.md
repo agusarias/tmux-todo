@@ -85,6 +85,11 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `TmuxEnv` by hand. Whenever a seam has a zero value that *means* something
   (here `""` = "not inside tmux"), the constructor is the thing to test: exercise
   the real entry point and assert it agrees with an explicitly-wired one.
+  **But "agrees with the environment" is vacuous when the environment is empty** —
+  `NewResolver().TmuxEnv == os.Getenv("TMUX")` is `"" == ""` outside tmux, so that
+  guard passes against the very bug it was written for on any tmux-less CI runner.
+  Fake the environment (`t.Setenv("TMUX", "/tmp/fake,1,0")`) so the assertion has
+  something to be wrong about; keep the live-tmux test as a separate, skippable leg.
 - **A multi-statement `Exec` applies statements up to the first failure** and
   leaves them there — hence the transaction around each migration. That per-file
   unit is a `SAVEPOINT` *inside* the one outer `BEGIN IMMEDIATE`, so a failed
