@@ -1,6 +1,6 @@
 # Scope Resolution
 
-**Status:** agreed
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -98,12 +98,13 @@ the Decisions log below and testing them directly.
   a new brief or the store's schema. The store task is in-progress, so adding a settings
   table would mean bouncing it to `blocked`; a small file in the XDG state dir keeps this
   self-contained. Consequence accepted: this package is no longer purely stateless.
-- **2026-08-19 (curator, assumption — flag if wrong):** Symlinks are resolved, so
+- **2026-08-19 (Checkpoint 1, confirmed):** Symlinks are resolved, so
   `/tmp/x` and `/private/tmp/x` key identically; paths are **not** case-folded, since
   lowercasing would be wrong on Linux. Note for tests: `t.TempDir()` on macOS is itself
   under a symlink.
-- **2026-08-19 (curator, assumption — flag if wrong):** With no sticky default ever set,
-  the fallback kind is `session` when in tmux, else `dir`. Design does not specify one.
+- **2026-08-19 (Checkpoint 1, confirmed):** With no sticky default ever set,
+  the fallback kind is `session` when in tmux, else `dir`. Design does not specify one;
+  confirmed explicitly at Checkpoint 1 over `dir`-always and `global`-always.
 
 ## Plan
 Single package, `internal/scope`, replacing the doc-only stub. No other package changes —
