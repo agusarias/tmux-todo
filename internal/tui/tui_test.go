@@ -105,9 +105,44 @@ func keyMsg(key string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyUp}
 	case "down":
 		return tea.KeyMsg{Type: tea.KeyDown}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "backspace":
+		return tea.KeyMsg{Type: tea.KeyBackspace}
+	case "delete":
+		return tea.KeyMsg{Type: tea.KeyDelete}
+	case "home":
+		return tea.KeyMsg{Type: tea.KeyHome}
+	case "end":
+		return tea.KeyMsg{Type: tea.KeyEnd}
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}
+	case "ctrl+k":
+		return tea.KeyMsg{Type: tea.KeyCtrlK}
+	case " ":
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 	default:
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
 	}
+}
+
+// windowSize is the resize message, named so tests read as sizes rather than as
+// bubbletea plumbing.
+func windowSize(w, h int) tea.WindowSizeMsg { return tea.WindowSizeMsg{Width: w, Height: h} }
+
+// typeText sends each rune of s as its own keystroke, the way a user types.
+func typeText(t *testing.T, m Model, s string) Model {
+	t.Helper()
+	for _, r := range s {
+		m = pressAndSettle(t, m, string(r))
+	}
+	return m
 }
 
 func texts(tasks []task.Task) []string {
@@ -465,9 +500,10 @@ func TestUnhandledKeysDoNothing(t *testing.T) {
 	loaded := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}})
 	loaded = pressAndSettle(t, loaded, "j")
 
-	// Includes the keys the follow-on UI tasks will claim: until they land,
-	// pressing them must be a no-op rather than a surprise.
-	for _, key := range []string{"x", "Z", "9", "0", "a", "e", "d", "s", "g"} {
+	// Includes the keys the follow-on UI tasks will claim (g, for the all-tasks
+	// view): until they land, pressing them must be a no-op rather than a
+	// surprise. a/e/d/s/u/? are bound by this task and are covered elsewhere.
+	for _, key := range []string{"x", "Z", "9", "0", "g"} {
 		m, cmd := press(t, loaded, key)
 		if cmd != nil {
 			t.Errorf("key %q produced a command, want none", key)
@@ -559,33 +595,50 @@ func TestEmptyStatesAreDistinct(t *testing.T) {
 	}
 }
 
-// TestViewMentionsVersion survives the placeholder's removal: the running
-// version stays visible in the popup.
+// TestViewMentionsVersion — the running version stays reachable from the popup,
+// but it is no longer in the footer: at contentWidth 42 a `git describe` stamp
+// pushes the keybindings off the end, and keys beat provenance. It lives in the
+// `?` overlay instead, which is where a user goes looking for "what is this".
 func TestViewMentionsVersion(t *testing.T) {
 	db := openDB(t)
 	add(t, db, "something", globalScope)
 	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Version: "1.2.3"})
-	if got := m.View(); !strings.Contains(got, "1.2.3") {
-		t.Errorf("View() does not mention the version:\n%s", got)
+
+	if got := m.footer(); strings.Contains(got, "1.2.3") {
+		t.Errorf("footer still carries the version, which is what made it too wide: %q", got)
+	}
+	helped := pressAndSettle(t, m, "?")
+	if got := helped.View(); !strings.Contains(got, "1.2.3") {
+		t.Errorf("the ? overlay does not mention the version:\n%s", got)
 	}
 }
 
-// TestFooterOnlyAdvertisesImplementedKeys — docs/design.md's mock shows the end
-// state (a/e/space/d/s/g). Those keys belong to the follow-on tasks; listing
-// them before they work would advertise dead keys.
-func TestFooterOnlyAdvertisesImplementedKeys(t *testing.T) {
+// TestFooterPointsAtTheOverlayInsteadOfEnumerating — the footer cannot hold
+// eleven keys and a version stamp in 42 columns, and truncation would drop the
+// last ones silently. It carries the few keys a first-time user needs and points
+// at `?` for the rest.
+func TestFooterPointsAtTheOverlayInsteadOfEnumerating(t *testing.T) {
 	db := openDB(t)
 	add(t, db, "something", globalScope)
 	footer := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}}).footer()
 
-	for _, want := range []string{"1/2/3", "space done", "q quit"} {
+	for _, want := range []string{"j/k move", "space done", "? keys", "q quit"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("footer %q missing %q", footer, want)
 		}
 	}
-	for _, unimplemented := range []string{"a add", "e edit", "d delete", "s re-scope", "g all"} {
-		if strings.Contains(footer, unimplemented) {
-			t.Errorf("footer advertises the unimplemented %q: %s", unimplemented, footer)
+	// Real keys, but the overlay's job. Putting them back here is what pushes
+	// the line over the width.
+	for _, elsewhere := range []string{"a add", "e edit", "d delete", "s re-scope", "1/2/3"} {
+		if strings.Contains(footer, elsewhere) {
+			t.Errorf("footer enumerates %q instead of pointing at ? keys: %s", elsewhere, footer)
+		}
+	}
+	// The keys it does not have must still exist somewhere.
+	help := strings.Join(helpLines("dev"), "\n")
+	for _, want := range []string{"a add", "e edit", "s re-scope", "d delete", "u undo", "1/2/3", "tab"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("the ? overlay is missing %q:\n%s", want, help)
 		}
 	}
 }
@@ -657,39 +710,69 @@ func TestFrameNeverExceedsThePane(t *testing.T) {
 	}
 	versions := []string{"dev", "ec132f9", longVersion}
 
+	// The modes this task adds render inside the body, so they are the obvious
+	// place for a chromeHeight miscount to reappear. "adding" also types a long
+	// title, because an input row that failed to window its text would wrap.
+	modes := []struct {
+		name  string
+		enter func(*testing.T, Model) Model
+	}{
+		{"normal", func(_ *testing.T, m Model) Model { return m }},
+		{"adding", func(t *testing.T, m Model) Model {
+			m = pressAndSettle(t, m, "a")
+			return typeText(t, m, strings.Repeat("long title ", 12))
+		}},
+		{"editing", func(t *testing.T, m Model) Model { return pressAndSettle(t, m, "e") }},
+		{"rejected edit", func(t *testing.T, m Model) Model {
+			m = pressAndSettle(t, m, "e")
+			m = pressAndSettle(t, m, "ctrl+u")
+			return pressAndSettle(t, m, "enter")
+		}},
+		{"help", func(t *testing.T, m Model) Model { return pressAndSettle(t, m, "?") }},
+		{"queued empty", func(t *testing.T, m Model) Model {
+			for range 60 {
+				m = pressAndSettle(t, m, "d")
+			}
+			return m
+		}},
+	}
+
 	for _, version := range versions {
 		for _, size := range sizes {
 			for _, filter := range []string{"", "1", "2", "3"} {
-				name := fmt.Sprintf("v=%s/%dx%d/filter=%q", version, size.w, size.h, filter)
-				t.Run(name, func(t *testing.T) {
-					m := newLoaded(t, Config{
-						DB: db, Scopes: scopes, Home: "/Users/x", Version: version,
-					})
-					sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
-					m = sized.(Model)
-					if filter != "" {
-						m = pressAndSettle(t, m, filter)
-					}
-
-					// Asserted on the *unclamped* frame: checking View's
-					// output would let the clampHeight backstop hide a
-					// miscounted chromeHeight instead of failing on it.
-					lines := strings.Split(m.frame(), "\n")
-					if len(lines) > size.h {
-						t.Errorf("frame is %d rows in a %d-row pane; the terminal will scroll and the top rows are lost:\n%s",
-							len(lines), size.h, m.frame())
-					}
-					if got := strings.Split(m.View(), "\n"); len(got) != len(lines) {
-						t.Errorf("the height backstop fired (%d rows -> %d); it is a safety net, not the mechanism",
-							len(lines), len(got))
-					}
-					for i, line := range lines {
-						if w := lipgloss.Width(line); w > size.w {
-							t.Errorf("line %d is %d columns in a %d-column pane: %q",
-								i, w, size.w, line)
+				for _, mode := range modes {
+					name := fmt.Sprintf("v=%s/%dx%d/filter=%q/%s", version, size.w, size.h, filter, mode.name)
+					t.Run(name, func(t *testing.T) {
+						m := newLoaded(t, Config{
+							DB: db, Scopes: scopes, Home: "/Users/x", Version: version,
+						})
+						sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+						m = sized.(Model)
+						if filter != "" {
+							m = pressAndSettle(t, m, filter)
 						}
-					}
-				})
+						m = mode.enter(t, m)
+
+						// Asserted on the *unclamped* frame: checking View's
+						// output would let the clampHeight backstop hide a
+						// miscounted chromeHeight instead of failing on it.
+						lines := strings.Split(m.frame(), "\n")
+						if len(lines) > size.h {
+							t.Errorf("frame is %d rows in a %d-row pane; the terminal will scroll and the top rows are lost:\n%s",
+								len(lines), size.h, m.frame())
+						}
+						if got := strings.Split(m.View(), "\n"); len(got) != len(lines) {
+							t.Errorf("the height backstop fired (%d rows -> %d); it is a safety net, not the mechanism",
+								len(lines), len(got))
+						}
+						for i, line := range lines {
+							if w := lipgloss.Width(line); w > size.w {
+								t.Errorf("line %d is %d columns in a %d-column pane: %q",
+									i, w, size.w, line)
+							}
+						}
+					})
+				}
 			}
 		}
 	}
@@ -727,20 +810,51 @@ func TestChromeLinesFitTheContentWidth(t *testing.T) {
 	}
 }
 
-// TestFooterKeepsTheKeysAndDropsTheVersion — when the footer must be cut, the
-// keybindings are the part worth keeping; the version is the tail.
-func TestFooterKeepsTheKeysAndDropsTheVersion(t *testing.T) {
+// TestFooterSurvivesTheNarrowestPopup is DoD 17, and it is the whole reason the
+// version left the footer.
+//
+// docs/design.md's ~60%x60% popup is 48 columns on an 80-column terminal, so
+// contentWidth is 42. The old footer was 49 columns with a `dev` stamp and 69
+// with a `git describe --dirty` one, so it was *always* truncated there — and
+// truncation removes the keys at the end, silently. This asserts the line needs
+// no truncation at all at that width, with the longest version stamp the
+// Makefile can produce, since the version must no longer be able to affect it.
+func TestFooterSurvivesTheNarrowestPopup(t *testing.T) {
 	db := openDB(t)
 	add(t, db, "something", globalScope)
-	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Version: longVersion})
-	sized, _ := m.Update(tea.WindowSizeMsg{Width: 48, Height: 12})
 
-	footer := sized.(Model).footer()
-	if !strings.Contains(footer, "1/2/3 filter") {
-		t.Errorf("truncation ate the first keybinding: %q", footer)
+	const designWidth = 48 // 60% of an 80-column terminal
+	for _, version := range []string{"", "dev", "ec132f9", longVersion} {
+		m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Version: version})
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: designWidth, Height: 12})
+		m = sized.(Model)
+
+		if got := m.contentWidth(); got != 42 {
+			t.Fatalf("contentWidth at %d columns = %d, want 42 — the premise of this test moved", designWidth, got)
+		}
+		footer := m.footer()
+		if strings.Contains(footer, ellipsis) {
+			t.Errorf("version %q: the footer was truncated at the design's own width: %q", version, footer)
+		}
+		if w := lipgloss.Width(footer); w > 42 {
+			t.Errorf("version %q: footer is %d columns, over the 42 available: %q", version, w, footer)
+		}
 	}
-	if !strings.Contains(footer, ellipsis) {
-		t.Errorf("footer was cut without an ellipsis to show it: %q", footer)
+}
+
+// TestHelpOverlayFitsTheNarrowestPopup — the overlay took the keys the footer
+// gave up, so it inherits the obligation to fit. Every line untruncated at 42
+// columns, and the whole thing inside the rows the list has.
+func TestHelpOverlayFitsTheNarrowestPopup(t *testing.T) {
+	for _, version := range []string{"", "dev", longVersion} {
+		for i, line := range helpLines(version) {
+			if strings.Contains(line, "\n") {
+				t.Errorf("version %q: help line %d spans rows: %q", version, i, line)
+			}
+			if w := lipgloss.Width(line); w > 42 {
+				t.Errorf("version %q: help line %d is %d columns, over 42: %q", version, i, w, line)
+			}
+		}
 	}
 }
 

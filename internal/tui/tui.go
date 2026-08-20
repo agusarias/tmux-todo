@@ -73,8 +73,24 @@ type Config struct {
 	// Home is the directory abbreviated to ~ when displaying dir scope keys.
 	// Display only; the keys themselves stay absolute.
 	Home string
-	// Version is shown in the footer.
+	// Version is shown in the help overlay. It is deliberately not in the
+	// footer: stamped from `git describe --tags --always --dirty`, it is long
+	// enough to push the footer past the ~42 columns a 60%x60% popup on an
+	// 80-column terminal has, and a footer that truncates hides keybindings.
 	Version string
+	// DefaultScope is the scope kind a new task starts on — the resolved sticky
+	// default, worked out by internal/cli, because this package must not import
+	// internal/scope. An empty or unavailable value degrades to the first scope
+	// in Scopes, so a stale stored preference can never seed a scope the user
+	// cannot submit to.
+	DefaultScope task.ScopeKind
+	// SetSticky persists the scope kind an add was filed under, so the next add
+	// starts there. Injected rather than reached for, exactly as Now is: the
+	// write lands in the XDG state dir, which this package must not know about.
+	//
+	// Nil is fine and means "do not remember". An error from it never fails the
+	// add — the task is already saved by then.
+	SetSticky func(task.ScopeKind) error
 	// Now is the clock the visibility cutoff is measured against. Injected, and
 	// defaulting to time.Now, for the same reason the store's DB.now is: a test
 	// can advance it 25h and prove a completed row leaves the view, which is not
@@ -94,14 +110,28 @@ func (c Config) now() time.Time {
 	return c.Now()
 }
 
-// mode is the key-dispatch mode. Only normal mode exists today; the input mode
-// that task-create-edit-rescope adds is the reason Update dispatches on this
-// rather than switching on the key alone — in an input row `q` is a literal
-// keystroke, not quit.
+// mode is the key-dispatch mode. It is why Update dispatches on the mode before
+// the key rather than switching on the key alone: in the input row `q` is a
+// literal keystroke, not quit, and with the help overlay up the mutation keys
+// must not fire behind it.
 type mode int
 
 const (
 	modeNormal mode = iota
+	modeInput
+	modeHelp
+)
+
+// inputKind distinguishes the two things the one input row does. They differ in
+// three places — where the row sits, what an empty Enter means, and whether Tab
+// cycles the scope — and every one of those differences is a decision recorded
+// in the brief, so they are worth naming rather than inferring from inputTarget
+// being zero.
+type inputKind int
+
+const (
+	inputAdd inputKind = iota
+	inputEdit
 )
 
 // viewKind selects which list is on screen. Only the merged view exists today;
@@ -133,6 +163,24 @@ type Model struct {
 	ready    bool // a query has come back at least once
 	err      error
 	quitting bool
+
+	// The input row. inputScope is the Tab-selected scope and matters only for
+	// an add; inputTarget is the task under edit and matters only for an edit.
+	input       field
+	inputKind   inputKind
+	inputScope  task.ScopeKind
+	inputTarget int64
+	inputHint   string
+
+	// queued holds the ids of rows `d` has removed from the view but not from
+	// the database. It is both the LIFO undo stack and the filter set, and that
+	// is the whole mechanism: because nothing was written, `u` restores the row
+	// at its original position with its original id for free — the store still
+	// has it. See delete.go.
+	queued []int64
+	// commitErr is what the queued deletes did on the way out. Update stores it
+	// and Run returns it: a delete that failed must not be reported as done.
+	commitErr error
 
 	width  int
 	height int
@@ -214,6 +262,18 @@ func (m Model) reloadAnchoredTo(anchor int64) tea.Cmd { return m.writeThenReload
 // a write, so the store stays the single source of truth for what is done, and
 // the whole action stays a single testable step.
 func (m Model) writeThenReload(anchor int64, write func(context.Context, *store.DB) error) tea.Cmd {
+	if write == nil {
+		return m.query(anchor, nil)
+	}
+	return m.query(anchor, func(ctx context.Context, db *store.DB) (int64, error) {
+		return anchor, write(ctx, db)
+	})
+}
+
+// query is the single place this package reads the store. The write it takes
+// returns the anchor as well as an error, because an insert only learns the id
+// it should put the cursor on by performing the insert.
+func (m Model) query(anchor int64, write func(context.Context, *store.DB) (int64, error)) tea.Cmd {
 	db := m.cfg.DB
 	scopes := m.activeScopes()
 	filter := store.Filter{Scopes: scopes, IncludeDone: true, DoneSince: m.doneSince()}
@@ -224,11 +284,13 @@ func (m Model) writeThenReload(anchor int64, write func(context.Context, *store.
 		defer cancel()
 
 		if write != nil && db != nil {
-			if err := write(ctx, db); err != nil {
+			chosen, err := write(ctx, db)
+			if err != nil {
 				// Keep the rows on screen: a failed write changed nothing, and
 				// blanking the list would read as "your tasks are gone".
 				return rowsMsg{tasks: current, err: err, anchor: anchor}
 			}
+			anchor = chosen
 		}
 
 		// An empty store.Filter.Scopes means *every scope in the database*, not
@@ -247,15 +309,29 @@ func (m Model) writeThenReload(anchor int64, write func(context.Context, *store.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case rowsMsg:
-		m.tasks = msg.tasks
+		// The queue filter lives here, at the one point every reload passes
+		// through, so "a queued row is unreachable on *every* reload" is
+		// structural rather than something each caller has to remember.
+		m.tasks = m.dropQueued(msg.tasks)
 		m.err = msg.err
 		m.ready = true
 		if msg.anchor != 0 {
 			m.anchorCursor(msg.anchor)
 		}
 		m.clampCursor()
+		// An edit whose row went away — another pane deleted it, or the reload
+		// that arrived was a `d` on it — has nothing left to save to.
+		if m.mode == modeInput && m.inputKind == inputEdit && !m.hasTask(m.inputTarget) {
+			m.closeInput()
+		}
 		m.refreshViewport()
 		return m, nil
+
+	case deletesCommittedMsg:
+		// Quit *in response to* the commit finishing, rather than racing it:
+		// tea.Quit issued alongside the commit could take effect first.
+		m.commitErr = msg.err
+		return m, tea.Quit
 
 	case tea.WindowSizeMsg:
 		// Popups do not resize once open, so this rarely fires — but sizing
@@ -270,6 +346,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.mode {
 		case modeNormal:
 			return m.updateNormal(msg)
+		case modeInput:
+			return m.updateInput(msg)
+		case modeHelp:
+			return m.updateHelp(msg)
 		}
 	}
 	return m, nil
@@ -280,8 +360,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc", "ctrl+c":
-		m.quitting = true
-		return m, tea.Quit
+		return m.quit()
+
+	case "?":
+		m.mode = modeHelp
+		return m, nil
+
+	case "a":
+		return m.startAdd()
+
+	case "e":
+		return m.startEdit()
+
+	case "s":
+		return m.rescopeSelected()
+
+	case "d":
+		return m.queueDelete()
+
+	case "u":
+		return m.undoDelete()
 
 	case "j", "down":
 		m.moveCursor(1)
@@ -302,6 +400,45 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.toggleFilter(task.ScopeGlobal)
 	}
 	return m, nil
+}
+
+// quit commits any queued deletes and then exits.
+//
+// With an empty queue the exit path is exactly what it was before this task:
+// one tea.Quit, no command in between. That matters because it is the path
+// every user who never presses `d` takes.
+func (m Model) quit() (tea.Model, tea.Cmd) {
+	m.quitting = true
+	if len(m.queued) == 0 {
+		return m, tea.Quit
+	}
+	return m, m.commitDeletesCmd()
+}
+
+// updateHelp handles keys while the keymap overlay is up. Everything else is
+// inert: the overlay covers the list, so a mutation key would act on a row the
+// user cannot see.
+//
+// `q` dismisses rather than quits. It reads oddly for one keypress and is the
+// better trade: two presses of `q` exit from anywhere, and a `q` that quit from
+// behind an overlay would exit a popup the user had only opened to read.
+func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "?", "esc", "q", "ctrl+c":
+		m.mode = modeNormal
+		return m, nil
+	}
+	return m, nil
+}
+
+// hasTask reports whether a task id is among the visible rows.
+func (m Model) hasTask(id int64) bool {
+	for _, t := range m.tasks {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // toggleDone flips the cursor row between pending and complete.
@@ -404,17 +541,44 @@ func (m *Model) refreshViewport() {
 	rows := renderRows(m.tasks, renderOpts{
 		Width:  m.vp.Width,
 		Home:   m.cfg.Home,
-		Cursor: m.cursor,
+		Cursor: m.cursorRow(),
 	})
+	// The input row goes *inside* the viewport rather than becoming a sixth
+	// chrome line: chromeHeight is a constant, three frame bugs have already
+	// shipped in that arithmetic, and a row the list scrolls is the cheaper
+	// half of the trade.
+	rows = m.withInputRow(rows)
 	m.vp.SetContent(strings.Join(rows, "\n"))
 
+	focus := m.focusRow()
 	switch h := m.vp.Height; {
 	case h <= 0:
-	case m.cursor < m.vp.YOffset:
-		m.vp.SetYOffset(m.cursor)
-	case m.cursor >= m.vp.YOffset+h:
-		m.vp.SetYOffset(m.cursor - h + 1)
+	case focus < m.vp.YOffset:
+		m.vp.SetYOffset(focus)
+	case focus >= m.vp.YOffset+h:
+		m.vp.SetYOffset(focus - h + 1)
 	}
+}
+
+// cursorRow is which task row carries the cursor mark. While adding, the input
+// row has the focus and no task row is marked.
+func (m Model) cursorRow() int {
+	if m.mode == modeInput && m.inputKind == inputAdd {
+		return -1
+	}
+	return m.cursor
+}
+
+// focusRow is the viewport row to keep on screen: the input row while it is
+// open, the cursor otherwise.
+func (m Model) focusRow() int {
+	if m.mode == modeInput {
+		return m.inputRowIndex()
+	}
+	if m.inputKind == inputAdd && m.mode == modeInput {
+		return 0
+	}
+	return m.cursor
 }
 
 // View renders the popup: title, list (or an empty state), footer.
@@ -493,20 +657,56 @@ func (m Model) body() string {
 	if !m.ready {
 		return emptyStyle.Render(truncate("loading…", m.contentWidth()))
 	}
-	if len(m.tasks) == 0 {
+	if m.mode == modeHelp {
+		// Replaces the list, like the error and loading states, so the overlay
+		// costs no chrome row.
+		return strings.Join(m.helpBody(), "\n")
+	}
+	// With the input row open the list is never empty, even before the first
+	// task exists — the row the user is typing into is itself a row.
+	if len(m.tasks) == 0 && m.mode != modeInput {
 		return emptyStyle.Render(truncate(m.emptyText(), m.contentWidth()))
 	}
 	return m.vp.View()
+}
+
+// helpBody is the keymap overlay, clipped to the rows the list has. Each line
+// is truncated like every other line View assembles: lipgloss wraps rather than
+// clips, and a wrapped help line would push the frame past the pane.
+func (m Model) helpBody() []string {
+	lines := helpLines(m.cfg.Version)
+	if h := m.listHeight(); len(lines) > h {
+		lines = lines[:h]
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, hintStyle.Render(truncate(line, m.contentWidth())))
+	}
+	return out
 }
 
 // emptyText distinguishes "there is nothing here at all" from "your filter hid
 // everything" — the second is a state the user can undo, and saying so is the
 // difference between a hint and a dead end.
 func (m Model) emptyText() string {
+	// A list emptied by `d` is not an empty list: the rows are still in the
+	// store and `u` brings them back. Saying "no tasks yet" here would be a lie
+	// that also hides the way out.
+	if len(m.queued) > 0 {
+		return fmt.Sprintf("%s queued for deletion — u undoes", plural(len(m.queued), "task"))
+	}
 	if m.filter != "" {
 		return fmt.Sprintf("no %s tasks — press %s again for all scopes", m.filter, filterKey(m.filter))
 	}
 	return "no tasks yet"
+}
+
+// plural renders a count with its noun: "1 task", "2 tasks".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // filterKey is the digit bound to a tier, for the empty-state hint.
@@ -523,23 +723,42 @@ func filterKey(kind task.ScopeKind) string {
 	}
 }
 
-// footer lists only the keys this build actually binds. docs/design.md's mock
-// shows the end state (a/e/space/d/s/g included); those keys belong to the three
-// follow-on UI tasks, and advertising them before they work would be a lie.
-// The line is truncated to the content width because Version is stamped from
-// `git describe --tags --always --dirty` (Makefile), so its length — and with
-// it the minimum width the popup can render at — varies with the build's git
-// state. A hint line is the right thing to lose the tail of; the frame is not.
+// footerText is the hint line, kept to 39 columns so it survives untruncated in
+// the narrowest popup the design specifies: ~60%x60% of an 80-column terminal is
+// 48 columns, which leaves contentWidth 42.
+//
+// It does not enumerate the keymap, and it no longer carries the version. The
+// full list is eleven keys and the version is stamped from `git describe`, so
+// spelling either out here would put the line back over the width and truncation
+// would silently eat the keys at the end — which is how `docs/design.md`'s own
+// footer mock came to specify a line 93 columns wide. `? keys` is the pointer;
+// helpLines is the list.
+const footerText = "j/k move · space done · ? keys · q quit"
+
 func (m Model) footer() string {
-	return hintStyle.Render(truncate(fmt.Sprintf(
-		"1/2/3 filter · j/k move · space done · q quit · v%s", m.cfg.Version),
-		m.contentWidth()))
+	return hintStyle.Render(truncate(footerText, m.contentWidth()))
 }
 
 // Run starts the popup and blocks until it exits.
-func Run(cfg Config) error {
-	if _, err := tea.NewProgram(New(cfg)).Run(); err != nil {
+//
+// It returns the final model's commitErr, so a queued delete that failed on the
+// way out reaches internal/cli and the exit code. The popup has already gone by
+// then, and reporting "deleted" for a row still in the database would be worse
+// than the delete not happening.
+func Run(cfg Config) error { return run(New(cfg)) }
+
+// run is Run with the program options exposed, so a test can drive the real
+// event loop with a scripted input and no terminal. Without this seam the only
+// thing asserting that Run reports commitErr would be inspection — and "the
+// production entry point is not what the tests exercise" is a bug this repo has
+// shipped twice.
+func run(m Model, opts ...tea.ProgramOption) error {
+	final, err := tea.NewProgram(m, opts...).Run()
+	if err != nil {
 		return fmt.Errorf("run tui: %w", err)
+	}
+	if final, ok := final.(Model); ok {
+		return final.commitErr
 	}
 	return nil
 }

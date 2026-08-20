@@ -108,11 +108,19 @@ func runTUI(args []string, stderr io.Writer) int {
 
 	// Active() is already in the merged list's tier order (session, dir,
 	// global), skipping whatever this context has no scope for.
+	//
+	// DefaultScope and SetSticky are the two halves of the sticky default, and
+	// both come off the *same* resolver openEnv already built. internal/tui must
+	// not import internal/scope, and a second `scope.Resolver{}` here would
+	// reintroduce the tmux-blindness bug the zero value causes — there is no
+	// second construction site to get wrong.
 	cfg := tui.Config{
-		DB:      e.db,
-		Scopes:  e.scopes.Active(),
-		Home:    homeDir(),
-		Version: Version,
+		DB:           e.db,
+		Scopes:       e.scopes.Active(),
+		Home:         homeDir(),
+		Version:      Version,
+		DefaultScope: e.resolver.StickyDefault(e.scopes),
+		SetSticky:    e.resolver.SetStickyDefault,
 	}
 	if err := tui.Run(cfg); err != nil {
 		fmt.Fprintf(stderr, "tdo: %v\n", err)

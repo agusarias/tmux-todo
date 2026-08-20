@@ -70,18 +70,33 @@ All three scopes **merged into one list** with a per-row scope glyph.
 · write migration
 ◉ call the dentist           (global)
 
-1/2/3 filter · a add · e edit · space done · d delete · s re-scope · g all · q quit
+j/k move · space done · ? keys · q quit
 ```
 
 **Order:** scope tier (session → dir → global), then newest first within each tier.
 
+**The footer is a pointer, not a keymap.** An earlier version of this mock listed every key
+— 83 columns, and 93 once `j/k` and the version stamp were added — inside a popup whose own
+geometry above gives the content 42. The list would have been silently truncated from the
+right, hiding the keys at the end. `?` opens a keymap overlay instead: it replaces the list
+body, so it costs no chrome row, and it is where the version lives too.
+
 ### Creating and editing
 
-- `a` opens an **inline input row** inside the popup showing the current scope glyph.
-- `Tab` cycles scope (session / dir / global) before submitting.
-- `Enter` saves, and that scope choice becomes the **sticky default** for the next task.
-- `e` reuses the same input row to edit an existing task's text.
-- `s` cycles an existing task's scope in place.
+- `a` opens an **inline input row** inside the popup showing the current scope glyph. It is
+  a row *in the list*, at the top, not an extra line of chrome — the frame arithmetic is
+  where this popup's bugs have lived.
+- `Tab` cycles scope before submitting, **through the scopes this context actually has**.
+  Outside tmux that is dir → global; with only global it is a no-op. A scope you cannot
+  submit to is never offered.
+- `Enter` saves, and that scope choice becomes the **sticky default** for the next task. An
+  empty `Enter` cancels instead: nothing exists yet, so there is nothing to lose.
+- `e` reuses the same input row, in place of the row being edited, to edit its text. Here an
+  empty `Enter` is **refused** — the task is on screen and blanking it would destroy
+  something visible. `Tab` is inert; scope changes go through `s`.
+- `s` cycles an existing task's scope in place, through the same available-only cycle. It
+  does **not** move the sticky default: correcting one old row should not redirect the next
+  add.
 
 ### Completion vs deletion
 
@@ -97,7 +112,11 @@ All three scopes **merged into one list** with a per-row scope glyph.
   DB. The only store primitive for purging is a hard `DELETE`, so those two halves could not
   both hold; resolved as hide-only. `store.PurgeDone` therefore has no caller and exists for
   an explicit `tdo purge` if one is ever wanted.)*
-- `d` deletes outright.
+- `d` removes the row and `u` puts it back. The delete is **queued**, not written: the row
+  stays in the database until the popup closes, so `u` restores it with its original id,
+  timestamp and position — none of which a re-insert could return. Two consequences, both
+  accepted: a queued row is still visible to a concurrent `tdo list`, and a popup that dies
+  without a clean exit deletes nothing. Both fail towards keeping your data.
 
 ### All-tasks view
 
