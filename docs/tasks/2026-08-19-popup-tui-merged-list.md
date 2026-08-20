@@ -488,6 +488,9 @@ this class of bug, since every case supplies `TmuxEnv` by hand.
 
 ## Evidence (fix-forward, 2026-08-20)
 
+**Merge commit:** `e831b42` on local `main` (unpushed) — `git show e831b42`,
+`git log -1 -p 1761312` for the fix commit itself.
+
 Second execution, addressing the five items in **Plan delta for the fix-forward pass**. The
 original merge `a0155d9` stays on `main`; this is additive on top.
 
