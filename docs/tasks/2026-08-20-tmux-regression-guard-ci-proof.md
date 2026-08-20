@@ -1,6 +1,6 @@
 # Make The Tmux Regression Guard CI-Proof
 
-**Status:** blocked
+**Status:** ready
 **Worktree:** ../todo-tmux-regression-guard (work committed on branch `tmux-regression-guard`, not merged)
 
 ## Goal
@@ -28,8 +28,11 @@ cannot regress behind a refactor" is an overclaim until this lands.
 - Must not touch the user's real state dir: any test reaching `StickyDefault` sets
   `StateDir` explicitly (`internal/scope/sticky.go:105-117` otherwise falls through to
   `$XDG_STATE_HOME` / `~/.local/state`).
-- `internal/scope` only. No production code change is expected — if one turns out to be
-  needed, that is a scope event.
+- `internal/scope`, **plus one narrowly-scoped seam in `internal/cli`** — widened by the
+  2026-08-20 scope event below, with the user's sign-off. The seam is `var runTUIProgram =
+  tui.Run` (or equivalent) and its substitution in `TestTUIWiringSmoke`; nothing else in
+  `internal/cli` changes. Asserting what `tui.Config` *contains* is explicitly **out of
+  scope** and belongs to `2026-08-20-assert-tui-config-wiring.md`.
 
 ## Critical surface
 None. Test-only change to a package whose production behaviour is already correct.
@@ -57,6 +60,45 @@ Run the suite three ways and record all three: inside tmux, under `env -u TMUX`,
 the task; without it in Evidence this task has not been verified.
 
 ## Blocked
+**RESOLVED 2026-08-20 by the curator — scope event, user signed off. Status back to `ready`.**
+
+**Answer: option (a), split.** Fix the hang in this task; the coverage half becomes its own
+brief. The Constraints above are widened to permit exactly the injection seam and nothing
+more, and DoD 5 stands unchanged — the full suite must be green inside tmux, which is now
+achievable.
+
+**Why fix it here rather than in its own task.** The hang breaks `make test` — the command
+CLAUDE.md documents — for every developer working inside tmux, which for a tmux plugin is
+every developer. Leaving that in a queued task means the repo's documented test command stays
+broken for as long as the queue takes. The fix is a five-line seam of the same shape as
+`newResolver`, and this task is already the one whose subject is "the test suite lies about
+the environment it runs in" — so it is thematically the right home, not just the convenient
+one.
+
+**Why the coverage half is split out.** The executor also spotted that nothing asserts what
+`tui.Config` *contains*, so `DefaultScope` and `SetSticky` — added by
+`task-create-edit-rescope` — are wired but unexercised. That is real coverage work with its
+own DoD, and it is a textbook instance of CLAUDE.md's standing pitfall about production
+wiring never being tested. Folding it in here would grow a brief triaged as a two-line test
+change into something needing a rewritten DoD. It is now
+`docs/tasks/2026-08-20-assert-tui-config-wiring.md` (`draft`).
+
+**Curator verified the finding independently** before answering, rather than taking the
+report at face value: reproduced on current `main` inside a private-socket tmux pane with
+stdout redirected to a file. The popup rendered anyway — Bubble Tea opens `/dev/tty`
+directly — and blocked until the 20s timeout panic. The captured frame carries the *new*
+39-column footer, confirming it reproduces post-merge and is not an artifact of the tree the
+executor tested. `TestTUIWiringSmoke`'s doc comment ("Bubble Tea needs a TTY and a test
+process has none") is simply false inside tmux and should be corrected as part of the fix.
+
+**Executor guidance for the resumed pass.** The finished `internal/scope` work is on branch
+`tmux-regression-guard` at commit `aabfac5`, unmerged, with the worktree
+`../todo-tmux-regression-guard` still in place — resume there rather than starting over. Add
+the seam, re-run DoD 5's in-tmux leg (it will need a real tmux pane, per CLAUDE.md's recipe;
+a private socket keeps it off the user's server), and record the in-tmux `make test`
+completing as evidence — that run is the point of the fix.
+
+### Original question, as raised by the executor
 
 **DoD 5 cannot be met, for a reason that has nothing to do with this change, and the fix is
 outside this task's Constraints.**
