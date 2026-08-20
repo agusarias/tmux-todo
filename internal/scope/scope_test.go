@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,12 +223,28 @@ func TestLookupUnknownKind(t *testing.T) {
 	}
 }
 
-// TestResolveAgainstRealEnvironment exercises the un-injected path: the zero
-// Resolver, real exec, real cwd. Inside tmux it also covers the subprocess and
-// reports the timing DoD 11 asks for; outside tmux it still checks that the real
-// os.Getwd path resolves this checkout to its main repo.
+// tmuxAlive reports whether a tmux server is actually reachable.
+//
+// That is not the same question as "$TMUX is set". The variable is inherited by
+// every child process and outlives the server: ssh into a box where the session
+// was killed, or a CI runner that inherited it, and $TMUX is non-empty while
+// display-message fails. Gating on the variable alone made this test fail on
+// exactly those machines —
+// `TMUX="/tmp/fake,1,0" go test ./internal/scope/` used to report "Session is
+// absent despite $TMUX being set", which was the test being wrong, not the code.
+func tmuxAlive() bool {
+	if os.Getenv("TMUX") == "" {
+		return false
+	}
+	return exec.Command("tmux", "display-message", "-p", "#{session_name}").Run() == nil
+}
+
+// TestResolveAgainstRealEnvironment exercises the un-injected path with real
+// exec and real cwd. Inside tmux it also covers the subprocess and reports the
+// timing DoD 11 asks for; outside tmux it still checks that the real os.Getwd
+// path resolves this checkout to its main repo.
 func TestResolveAgainstRealEnvironment(t *testing.T) {
-	r := Resolver{TmuxEnv: os.Getenv("TMUX")}
+	r := NewResolver()
 
 	start := time.Now()
 	got, err := r.Resolve()
@@ -247,15 +264,15 @@ func TestResolveAgainstRealEnvironment(t *testing.T) {
 	if strings.HasSuffix(got.Dir.Key, filepath.Join("internal", "scope")) {
 		t.Errorf("Dir key %q is the package directory, not a repo root", got.Dir.Key)
 	}
-	if os.Getenv("TMUX") == "" {
-		t.Log("not inside tmux: session scope is absent, as designed")
+	if !tmuxAlive() {
+		t.Log("no reachable tmux server: session scope is absent, as designed")
 		if got.Session != nil {
-			t.Errorf("Session = %+v with $TMUX unset", *got.Session)
+			t.Errorf("Session = %+v with no tmux server reachable", *got.Session)
 		}
 		return
 	}
 	if got.Session == nil {
-		t.Error("Session is absent despite $TMUX being set")
+		t.Error("Session is absent despite a reachable tmux server")
 	}
 	// Deliberately no wall-clock assertion here. The measured cold median is
 	// ~5.7ms against a ~10ms budget, but the tail reaches 12ms on a busy machine,
@@ -267,6 +284,88 @@ func TestResolveAgainstRealEnvironment(t *testing.T) {
 	}
 }
 
+// TestPackageResolveMatchesTheRealEnvironment covers the entry point every
+// caller actually uses. It exists because the package shipped with
+// `Resolve()` = `Resolver{}.Resolve()`, whose empty TmuxEnv made session scope
+// permanently unavailable in the binary while all 28 tests passed — every one of
+// them injected TmuxEnv by hand, so the suite validated the injected path and
+// never the production default.
+//
+// The assertion is therefore deliberately about the *default wiring*, not about
+// resolution logic that is already covered above: Resolve() must agree with an
+// explicitly-wired Resolver, and must track the real environment.
+func TestPackageResolveMatchesTheRealEnvironment(t *testing.T) {
+	got, err := Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// The exact comparison the bug failed: the convenience entry point and a
+	// hand-wired resolver must see the same world.
+	wired, err := Resolver{TmuxEnv: os.Getenv("TMUX")}.Resolve()
+	if err != nil {
+		t.Fatalf("wired Resolve: %v", err)
+	}
+	if scopeString(got.Session) != scopeString(wired.Session) {
+		t.Errorf("Resolve() session = %s, but Resolver{TmuxEnv: $TMUX} sees %s"+
+			" — the package entry point is not wired to the real environment",
+			scopeString(got.Session), scopeString(wired.Session))
+	}
+
+	if tmuxAlive() {
+		if got.Session == nil {
+			t.Fatal("Resolve() reports no session scope from inside a live tmux session")
+		}
+		out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}").Output()
+		if err != nil {
+			t.Fatalf("ask tmux for the session name: %v", err)
+		}
+		if want := strings.TrimSpace(string(out)); got.Session.Key != want {
+			t.Errorf("Resolve() session key = %q, want tmux's %q", got.Session.Key, want)
+		}
+		t.Logf("live tmux: Resolve() session = %s", scopeString(got.Session))
+	} else if got.Session != nil {
+		t.Errorf("Resolve() invented session scope %s with no reachable tmux server",
+			scopeString(got.Session))
+	}
+}
+
+// TestNewResolverCarriesTmuxEnv pins the constructor itself, so the default
+// cannot regress behind a refactor of Resolve.
+func TestNewResolverCarriesTmuxEnv(t *testing.T) {
+	if got, want := NewResolver().TmuxEnv, os.Getenv("TMUX"); got != want {
+		t.Errorf("NewResolver().TmuxEnv = %q, want $TMUX %q", got, want)
+	}
+	// The zero value is the trap this task shipped; it must stay distinguishable
+	// so nobody reads Resolver{} as "the real environment" again.
+	if zero := (Resolver{}); os.Getenv("TMUX") != "" && zero.TmuxEnv != "" {
+		t.Error("Resolver{} picked up $TMUX; the injection seam is gone")
+	}
+}
+
+// TestStickyDefaultReachesSessionInTheRealEnvironment is the user-visible half
+// of the same bug: StickyDefault degrades session -> dir off `rs.Session != nil`,
+// so a permanently-nil Session silently downgraded every user's default.
+func TestStickyDefaultReachesSessionInTheRealEnvironment(t *testing.T) {
+	if !tmuxAlive() {
+		t.Skip("needs a reachable tmux server")
+	}
+	r := NewResolver()
+	r.StateDir = t.TempDir() // never touch the user's real sticky default
+
+	rs, err := r.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := r.SetStickyDefault(task.ScopeSession); err != nil {
+		t.Fatalf("SetStickyDefault: %v", err)
+	}
+	if got := r.StickyDefault(rs); got != task.ScopeSession {
+		t.Errorf("StickyDefault = %q inside tmux with session stored, want %q"+
+			" — session scope is unreachable through the production path", got, task.ScopeSession)
+	}
+}
+
 func scopeString(s *task.Scope) string {
 	if s == nil {
 		return "<absent>"
@@ -275,7 +374,7 @@ func scopeString(s *task.Scope) string {
 }
 
 func BenchmarkResolve(b *testing.B) {
-	r := Resolver{TmuxEnv: os.Getenv("TMUX")}
+	r := NewResolver()
 	for b.Loop() {
 		if _, err := r.Resolve(); err != nil {
 			b.Fatal(err)
