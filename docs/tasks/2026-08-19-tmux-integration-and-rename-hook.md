@@ -1,7 +1,7 @@
 # Tmux Integration And Rename Hook
 
-**Status:** in-progress
-**Worktree:** ../todo-tmux-integration
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 Wire `tdo` into tmux so the popup is reachable and session-scoped tasks survive a session
@@ -281,7 +281,12 @@ driven by an injected command runner, so the bulk of the task never shells out.
 
 ## Evidence
 
-All output below is real, from this worktree (`../todo-tmux-integration`) on tmux 3.7b,
+**Merged into local `main` as `683348c`** (implementation commit `0b8f5a4`; the worktree
+`../todo-tmux-integration` has been removed, so read the diff with `git show 0b8f5a4` or
+`git log -1 -p 683348c`). Not pushed. `make test`, `make lint` and `make build` were re-run
+on `main` after the merge and are green there too.
+
+All output below is real, from the worktree (`../todo-tmux-integration`) on tmux 3.7b,
 go1.26.6, macOS arm64. Real-tmux legs run on private sockets (`tmux -L …`) with
 `XDG_DATA_HOME` pointed at a temp dir, so the user's database was never touched.
 
