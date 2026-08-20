@@ -1,0 +1,130 @@
+# CI for tmux-todo.
+#
+# Three jobs, and the split between them is the point rather than a convenience:
+#
+#   go      — `go test ./...` on a runner with NO tmux. That is the environment
+#             this repo's scope and TUI guards were written to survive and, until
+#             now, had never actually run in: every one of them has only ever run
+#             on a developer's machine inside tmux. See the assertion below.
+#   plugin  — the shell harness, which drives real `tmux -L` servers and so is
+#             the one job that must have tmux. Ubuntu only: tmux is one apt-get
+#             there and a brew install with no extra coverage on macOS.
+#   build   — the four release targets, cross-compiled. This proves the matrix
+#             the release workflow depends on without needing a tag.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# The default token needs nothing but a checkout here.
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The go.mod directive, never a literal: the floor the README promises
+          # and the floor CI proves must not be able to drift apart.
+          go-version-file: go.mod
+          cache: true
+
+      # The reason this job exists. `make test` is `go test ./...` and is
+      # required to run without a tmux server; two shipped bugs in this repo
+      # were guards that passed *because* the machine had tmux, or passed
+      # vacuously because it did not. Asserting the absence makes the
+      # environment part of the contract instead of an accident of the image.
+      #
+      # Both runner images ship without tmux (actions/runner-images, Ubuntu
+      # 24.04 and macOS 15 readmes, checked 2026-08-20). If an image ever gains
+      # it, the fix is to mask it for this job — e.g. move the binary aside, or
+      # run the suite with a PATH that excludes it — NOT to delete this step.
+      - name: Assert the runner has no tmux
+        run: |
+          if command -v tmux >/dev/null 2>&1; then
+            echo "::error::tmux is on this runner at $(command -v tmux)."
+            echo "The go job exists to run the suite with NO tmux server, because"
+            echo "that is where this repo's guards have historically been wrong."
+            echo "Mask tmux for this job; do not delete this assertion."
+            exit 1
+          fi
+          echo "no tmux on PATH: the scope, wiring and TUI guards run for real"
+
+      # Through the Makefile so CI and a developer's shell cannot diverge:
+      # lint is `go vet ./...` plus a `gofmt -l .` check that fails on output.
+      - name: make lint
+        run: make lint
+
+      - name: make test
+        run: make test
+
+  plugin:
+    name: plugin harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The harness needs a tmux binary; it starts its own private servers with
+      # `tmux -L` and never touches a developer's. It also sandboxes `tdo`, `go`
+      # and the downloader, so a system-wide install of any of them in /usr/bin
+      # would make it abort rather than test nothing.
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux
+          tmux -V
+
+      - name: make test-plugin
+        run: make test-plugin
+
+  build:
+    name: cross-compile
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # No C toolchain per target, which is the whole dividend of choosing
+      # modernc.org/sqlite over mattn/go-sqlite3: a plain GOOS/GOARCH matrix.
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/agusarias/tmux-todo/internal/cli.Version=ci-${GITHUB_SHA::12}" \
+            -o "tdo-${GOOS}-${GOARCH}" ./cmd/tdo
+          ls -l "tdo-${GOOS}-${GOARCH}"
+          file "tdo-${GOOS}-${GOARCH}"

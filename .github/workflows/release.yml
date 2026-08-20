@@ -1,0 +1,125 @@
+# Release for tmux-todo: a `v*` tag publishes four binaries and a checksums file.
+#
+# ASSET NAMES ARE A CONTRACT, not a convenience. `tmux-todo.tmux` computes the
+# name it wants from `uname -s`/`uname -m` and fetches it from
+# /releases/latest/download/<name>; renaming an asset, adding a version to it or
+# wrapping it in a tarball breaks every installed plugin at its next tmux server
+# start. The four names, fixed:
+#
+#     tdo-darwin-arm64   tdo-darwin-amd64   tdo-linux-amd64   tdo-linux-arm64
+#     checksums.txt      (sha256sum format: "<hex>  <asset>")
+#
+# No archive: the payload is one static binary, so a tarball would only add a
+# `tar` dependency to the plugin's install path. No version in the name: the
+# /releases/latest/download URL already carries it, and a version in the name
+# would make that URL unguessable.
+#
+# One ubuntu job builds all four, because CGO_ENABLED=0 makes cross-compilation
+# a GOOS/GOARCH loop with no per-target toolchain. Windows is deliberately never
+# built: tmux is POSIX-only, so a windows asset would only invite bug reports
+# from a configuration that cannot work (WSL users are linux/amd64).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # creating the release and uploading its assets
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, so `git describe` in a source build agrees
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The version stamp is the tag itself, not `git describe`: a released
+      # binary's `tdo --version` must be readable straight off the release page.
+      # Same -trimpath and same -ldflags as the Makefile, so a release build and
+      # a local `make build` differ only in what Version is set to.
+      - name: Build the four targets
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME}
+          echo "version stamp: $version"
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            goos=${target%/*}
+            goarch=${target#*/}
+            out="tdo-${goos}-${goarch}"
+            echo "== $out"
+            GOOS=$goos GOARCH=$goarch go build -trimpath \
+              -ldflags "-s -w -X github.com/agusarias/tmux-todo/internal/cli.Version=${version}" \
+              -o "$out" ./cmd/tdo
+            chmod +x "$out"
+            ls -l "$out"
+            file "$out"
+          done
+
+      # The native target is the only one this runner can execute, so it is the
+      # one that gets exercised rather than merely built.
+      - name: Verify the linux/amd64 binary is static and works
+        run: |
+          set -eu
+          bin=./tdo-linux-amd64
+
+          # CGO_ENABLED=0 means no dynamic loader at all; ldd exits non-zero
+          # with "not a dynamic executable". A libsqlite3 in here would mean the
+          # build had silently fallen back to cgo (CLAUDE.md's driver decision).
+          if ldd "$bin" 2>&1 | grep -qi sqlite; then
+            echo "::error::the binary links libsqlite3 — CGO_ENABLED=0 did not hold"
+            ldd "$bin" || true
+            exit 1
+          fi
+          ldd "$bin" 2>&1 | head -3 || true
+          file "$bin" | grep -q "statically linked" || {
+            echo "::error::not statically linked"; file "$bin"; exit 1; }
+
+          # ...and the tag really is in there.
+          got=$("$bin" --version)
+          echo "--version: $got"
+          case $got in
+            *"${GITHUB_REF_NAME}"*) echo "version stamp present" ;;
+            *) echo "::error::--version ('$got') does not carry the tag '${GITHUB_REF_NAME}'"; exit 1 ;;
+          esac
+
+          # A real store on a throwaway database: migrations run, schema
+          # version reported, no dynamic library missing at runtime.
+          "$bin" doctor --db "$(mktemp -d)/tasks.db"
+
+      # sha256sum's own format, so `sha256sum -c checksums.txt` verifies the
+      # whole set and the plugin can pick one line out with awk.
+      - name: checksums.txt
+        run: |
+          set -eu
+          sha256sum tdo-darwin-arm64 tdo-darwin-amd64 tdo-linux-amd64 tdo-linux-arm64 \
+            > checksums.txt
+          cat checksums.txt
+          sha256sum -c checksums.txt
+
+      # `gh` is preinstalled on the runner, so no third-party action is in the
+      # trust path of the thing users download. The tag already exists (it is
+      # what triggered this run), so `gh release create` only creates the
+      # release object and uploads the assets.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            tdo-darwin-arm64 tdo-darwin-amd64 tdo-linux-amd64 tdo-linux-arm64 \
+            checksums.txt
+          gh release view "${GITHUB_REF_NAME}" --json assets \
+            --jq '.assets[].name'

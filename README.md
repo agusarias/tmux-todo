@@ -38,29 +38,75 @@ The plugin needs a `tdo` binary and finds one in this order, stopping at the
 first success:
 
 1. `tdo` on your `$PATH` — so your own install always wins
-2. `bin/tdo` inside the plugin directory — a build we made earlier
-3. otherwise it builds one with `go build`, **once**, if `go` 1.25 or newer is
+2. `bin/tdo` inside the plugin directory — a binary we downloaded or built earlier
+3. otherwise it **downloads** the release binary for your platform, **once** — so
+   you do not need a Go toolchain
+4. failing that, it builds one with `go build`, once, if `go` 1.25 or newer is
    available
-4. if none of that works, **no keybind is installed** and tmux shows a message
+5. if none of that works, **no keybind is installed** and tmux shows a message
    saying why
 
-Step 4 is deliberate: a keybind pointing at a missing binary looks like the
+Step 5 is deliberate: a keybind pointing at a missing binary looks like the
 plugin's fault when you press the key, which is a worse failure than being told
 at install time. If you see that message, either put `tdo` on your `$PATH` or run
 `make build` in the plugin directory.
 
 Steps 1 and 2 are the steady state, and they do no build and touch no network —
 tmux re-runs the plugin script on every server start, so that path stays cheap.
+The download in step 3 happens on a first install and never again.
+
+**About step 3.** The download comes from this repository's latest GitHub release
+over HTTPS, and its SHA-256 is checked against the release's `checksums.txt`
+before the file is moved into place:
+
+- sums match → the binary is used;
+- sums **disagree** → the download is deleted and the plugin falls through to
+  step 4. It is never executed;
+- `checksums.txt` cannot be fetched, or the machine has no `sha256sum`/`shasum` →
+  the binary is used **unverified**, and tmux says so, once. This is the
+  deliberate trade: a missing checksums file should not block an install. If you
+  would rather it did, install `tdo` yourself (step 1) or build from source.
+
+Binaries are published for `darwin/arm64`, `darwin/amd64`, `linux/amd64` and
+`linux/arm64`. Any other platform, no network, no `curl` **and** no `wget`, or a
+release with no asset for you: the step is skipped and step 4 gets its turn.
+Nothing here can fail your tmux server start.
+
+Set `TDO_RELEASE_BASE_URL` in the environment tmux starts in to fetch from a
+mirror instead.
 
 ### Without TPM
 
-Build and install the binary, then add the two commands to your config yourself:
+#### From a release binary
+
+No toolchain needed. Pick the asset for your platform — `tdo-darwin-arm64`,
+`tdo-darwin-amd64`, `tdo-linux-amd64` or `tdo-linux-arm64` — and verify it before
+you run it:
+
+```sh
+base=https://github.com/agusarias/tmux-todo/releases/latest/download
+asset=tdo-darwin-arm64                      # your platform
+
+curl -fsSLO "$base/$asset"
+curl -fsSLO "$base/checksums.txt"
+grep " $asset\$" checksums.txt | shasum -a 256 -c -   # sha256sum -c - on Linux
+
+chmod +x "$asset"
+mv "$asset" ~/.local/bin/tdo                # anywhere on your $PATH
+```
+
+`tdo --version` should print the release tag. The binary is one static file with
+no runtime dependencies, so uninstalling is deleting it.
+
+#### From source
 
 ```sh
 git clone https://github.com/agusarias/tmux-todo
 cd tmux-todo
 make build && cp bin/tdo ~/.local/bin/   # anywhere on your $PATH
 ```
+
+Either way, point tmux at the plugin script:
 
 ```tmux
 set -g @todo-key 't'            # optional, and must precede the run-shell

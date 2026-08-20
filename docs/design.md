@@ -240,26 +240,103 @@ honouring one would install a key nothing can press. Those two
 commands are recorded verbatim in
 `docs/tasks/done/2026-08-19-tmux-integration-and-rename-hook.md`.
 
-**Binary resolution is a four-step chain**, stopping at the first success:
+**Binary resolution is a five-step chain**, stopping at the first success:
 
 1. `tdo` on `$PATH` — a user's own install wins over anything we built
-2. `$PLUGIN_DIR/bin/tdo`, if executable — so a build happens once, not per start
-3. `go build` into `$PLUGIN_DIR/bin/tdo`, only if `go` is present and >= 1.25
-4. otherwise **no keybind at all**, plus a message naming the problem and the fix
+2. `$PLUGIN_DIR/bin/tdo`, if executable — so a download or build happens once, not per start
+3. the **release asset** for this platform, downloaded into `$PLUGIN_DIR/bin/tdo`
+4. `go build` into `$PLUGIN_DIR/bin/tdo`, only if `go` is present and >= 1.25
+5. otherwise **no keybind at all**, plus a message naming the problem and the fix
 
-Step 4 not binding anything is the deliberate part: a keybind onto a missing binary
+Step 5 not binding anything is the deliberate part: a keybind onto a missing binary
 misattributes the failure to press time rather than install time. A `go version` the script
-cannot parse falls to step 4 rather than optimistically building, because building with an
+cannot parse falls to step 5 rather than optimistically building, because building with an
 old toolchain fails with a message about the `go` directive that reads like a bug in this
 repo.
 
-The chain ends in a *source build* rather than a download because there is no release
-infrastructure to download from — no tags, no CI, and `bin/` is gitignored. Fetching a
-prebuilt binary is the better end state and is deferred to its own task, at which point step
-3 becomes "download, then build as a fallback".
+**Step 3 goes third, not first, and the source build survives behind it.** Ahead of it, a
+user's own `tdo` still wins and an existing install is still reused, so nothing that worked
+before the download existed stops working; behind it, `go build` is what keeps the chain
+honest on a machine with no network or an unshipped platform. Every failure in step 3 —
+offline, DNS failure, a 404 for this platform, a 403 rate limit, a checksum mismatch, no
+`curl` **and** no `wget`, an unmapped `uname` — falls through to step 4 rather than failing
+the script. Nothing in the install path may fail a tmux server start.
+
+### The release asset contract
+
+Four targets, named `tdo-<goos>-<goarch>`: `darwin/arm64`, `darwin/amd64`, `linux/amd64`,
+`linux/arm64`. **`CGO_ENABLED=0` is what makes that a plain `GOOS`/`GOARCH` matrix** with no
+per-target C toolchain — the dividend of choosing `modernc.org/sqlite`, and all six targets
+tried (including `freebsd/amd64` and `windows/amd64`) build clean at ~7.5MB. The constraint
+is therefore tmux's reach, not Go's: **windows is deliberately never shipped**, because tmux
+is POSIX-only and a windows asset would invite bug reports from a configuration that cannot
+work. WSL users are `linux/amd64`. `freebsd/amd64` builds and can be added on request.
+
+No archive and no version in the asset name. The payload is one static binary, so a tarball
+would only add a `tar` dependency to the install path; and the version lives in the URL, not
+the name, because the plugin fetches
+`https://github.com/<owner>/<repo>/releases/latest/download/<asset>`. That URL redirects to
+the current release, which is what buys **no GitHub API call** — no JSON to parse, no `jq`,
+and no exposure to the unauthenticated rate limit that a script sourced on every tmux server
+start would otherwise be an excellent way to hit. Renaming an asset is therefore a breaking
+change for every installed plugin.
+
+A `checksums.txt` in `sha256sum` format sits alongside them.
+
+**Verification is best-effort by explicit decision, and the three outcomes are not
+symmetric.** A sum that matches is used. A sum that *disagrees* is fatal: the download is
+deleted and the chain falls to step 4, never executing what arrived. But when
+`checksums.txt` is unreachable or the box has no `sha256sum`/`shasum`, the download proceeds
+**unverified** with a one-off `display-message` saying so — an install must not be blocked by
+a missing checksums file. The residual risk is real and accepted: an attacker who can serve
+a binary while suppressing `checksums.txt` gets code execution at a tmux server start. Two
+things bound it — a positive mismatch still refuses, and the transport is HTTPS to GitHub, so
+this needs breaking TLS or compromising the release itself. Signature verification
+(minisign/cosign) is the actual fix and is deliberately out of scope; it needs key
+management.
+
+The download writes to a temp file **inside the destination directory** and moves it into
+place only after verification. Same filesystem, so the move is a rename and therefore
+atomic. `$PLUGIN_DIR/bin/tdo` is what step 2 trusts on every later server start, so a
+truncated download landing there would be a permanently broken install that the chain never
+retries.
+
+`$TDO_RELEASE_BASE_URL` overrides the base. That is the seam `test/plugin_install_test.sh`
+serves fixtures through — a local `python3 -m http.server`, so the 404 leg is a real HTTP 404
+rather than a missing local file — and it doubles as the way to point an install at a mirror.
+
+### CI
+
+`.github/workflows/ci.yml`, on push and pull request: `go` on `ubuntu-latest` **and**
+`macos-latest`, `plugin` on `ubuntu-latest`, and a `build` matrix cross-compiling all four
+targets so a tag never depends on an unproven matrix. Go comes from `go-version-file: go.mod`
+rather than a literal, so the floor the README promises and the floor CI proves cannot drift.
+
+**The `go` job asserts the runner has no tmux**, and that is the point of splitting it from
+the plugin job rather than a side effect. Two shipped bugs in this repo were guards that were
+vacuous on a tmux-less machine, and CI is the first environment where they run on one. The
+plugin harness is the inverse — it drives real `tmux -L` servers — so it gets its own job and
+one `apt-get`, on ubuntu only: tmux on macOS is more trouble for no additional coverage.
+
+`.github/workflows/release.yml` triggers on `v*` and does the whole thing in one ubuntu job:
+build four, verify the native one is static (no `libsqlite3`) and that `tdo doctor` works on
+a throwaway database, write `checksums.txt`, publish with `gh` — preinstalled, so no
+third-party action sits in the trust path of what users download. The version stamp is the
+tag itself rather than `git describe`, so a released binary's `tdo --version` is readable
+straight off the release page.
+
+**The first tag is `v0.1.0`, not `v1.0.0`.** The v1 feature cut line below closed on
+2026-08-20, so the *features* are complete — but there are no external users and no
+real-world shakedown, and `1.0.0` would commit semver stability on the `--json` contract, the
+scope-key normalisation rules and the CLI surface. `0.x` says the shape may still move. It
+also finally gives `git describe` something real: with zero tags it yields a bare commit
+hash, so **every build in this project's history has stamped a version like `e91f97b-dirty`.**
 
 **TPM sources plugin scripts on every server start**, not only at install, which shapes the
-whole script: steps 1 and 2 do no build and no network. `bind-key` *replaces* a binding, so
+whole script: steps 1 and 2 do no build and no network. Since step 3 exists that is now an
+assertion rather than a claim — the harness's steady-state case puts a `curl` and a `wget` on
+`$PATH` that touch a canary file when invoked, so a network call sneaking onto the resolved
+path is a test failure instead of a round-trip (or, offline, a hang) at every server start. `bind-key` *replaces* a binding, so
 re-running is idempotent for free; `set-hook -ga` *appends*, so the hook install is guarded
 by a grep of the existing hook's **body** — a grep of its *name* matches the bare
 `session-renamed` line tmux prints for zero hooks and would silently skip installing. `-ga`
