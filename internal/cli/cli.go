@@ -11,7 +11,6 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/agusarias/tmux-todo/internal/scope"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/tui"
 )
@@ -32,6 +31,10 @@ commands:
   rm <id>                                 delete a task
   count [--pending] [--scope=...]         print a bare count
   tui                                     open the popup TUI
+  session-renamed [-- "<name>"]           re-file a renamed session's tasks
+                                          under its current name (the tmux
+                                          session-renamed hook; no argument
+                                          means the session tdo is running in)
   doctor                                  check the toolchain and database wiring
   version                                 print the version
   help                                    print this message
@@ -69,6 +72,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runCount(args[1:], stdout, stderr)
 	case "tui":
 		return runTUI(args[1:], stderr)
+	case "session-renamed":
+		return runSessionRenamed(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
 	default:
@@ -80,6 +85,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 // runTUI opens the popup. Everything environment-dependent is resolved here and
 // injected: internal/tui never asks tmux or the filesystem anything, which is
 // what keeps its Update/View testable headlessly.
+//
+// It goes through openEnv like every other command — deliberately, because
+// openEnv is where the session_id -> name map is refreshed and the popup is the
+// invocation a user makes most. There is still no --db flag (docs/design.md), so
+// the path is always the XDG one.
 func runTUI(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -87,29 +97,20 @@ func runTUI(args []string, stderr io.Writer) int {
 		return 2
 	}
 
-	path, err := store.DefaultPath()
+	// io.Discard: the popup owns the terminal, so a command-style stdout write
+	// would land in the middle of the frame.
+	e, closeDB, err := openEnv("", io.Discard, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "tdo: %v\n", err)
 		return 1
 	}
-	db, err := store.Open(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "tdo: %v\n", err)
-		return 1
-	}
-	defer db.Close()
-
-	resolved, err := scope.Resolve()
-	if err != nil {
-		fmt.Fprintf(stderr, "tdo: %v\n", err)
-		return 1
-	}
+	defer closeDB()
 
 	// Active() is already in the merged list's tier order (session, dir,
 	// global), skipping whatever this context has no scope for.
 	cfg := tui.Config{
-		DB:      db,
-		Scopes:  resolved.Active(),
+		DB:      e.db,
+		Scopes:  e.scopes.Active(),
 		Home:    homeDir(),
 		Version: Version,
 	}

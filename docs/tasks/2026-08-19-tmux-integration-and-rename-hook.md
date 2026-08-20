@@ -177,6 +177,48 @@ overlay was seen.
   than a pre-emptive optimisation — read-then-write-only-on-change is the known fix if the
   number says so, and guessing at it now would add a read to every invocation to avoid a
   cost nobody has observed. Status `ready`.
+- **2026-08-20 (executor — the exact-match target the plan assumed does not exist):**
+  `display-message -t '=<name>'` returns **an empty line and exit 0** on tmux 3.7b, because
+  `-t` there is a target-*pane* and `=dev` is parsed as a pane name. The working form is
+  `-t '=<name>:'`; the trailing colon is what makes tmux read the target as a session, and
+  the `=` then forces the exact match the plan wanted. Found only because `SessionID`
+  treats empty output as an error instead of an empty id — a silent-empty tmux answer is
+  the failure mode to design against here.
+- **2026-08-20 (executor — the hook takes NO argument; this closes a command injection):**
+  the plan had the hook pass the new name (`run-shell "tdo session-renamed -- '#{hook_session_name}'"`),
+  and measured against real tmux that form recovers renames for names containing a space,
+  `"`, `$`, `;`, a backtick or `#` — but **not** `'`, and not `:`. The `'` case is not
+  merely an unrecovered rename: a session called `x'; touch /tmp/pwned; '` breaks out of the
+  sh single quotes and **executes**. No tmux format escapes for a shell (`#{q:}` escapes for
+  tmux's own parser), so the fix is to interpolate nothing. `run-shell`'s child inherits
+  `$TMUX`, whose third field is the session the hook fired for, so a bare
+  `tdo session-renamed` already knows which session it is. Verified: with the argument-free
+  hook all nine awkward names — including `a:b` and the injection payload — re-file
+  correctly, and the canary file is never created. **DoD 7's named form is unchanged and
+  still tested**; the no-argument form is an additional entry point, and it is the one the
+  installed hook uses. This is a change to *how* DoD 9's install command is written, not to
+  what the task delivers — flagged here because it is the one place the plan was overruled
+  by a security finding rather than by a bug.
+- **2026-08-20 (executor — `display-popup` cannot compute its own floor):** `-w`/`-h` do
+  **not** expand formats (tmux 3.7b: `width invalid`), so `max(60%, 60)` cannot be an
+  expression and the keybind branches with `if-shell -F` instead. Two further traps, both
+  hit: `#{>=:x,y}` compares **strings**, so `#{>=:80,100}` is *true* and the first version of
+  the keybind silently took the 60% branch on an 80-column terminal; and
+  `display-message -p` **eats a literal `%`**, so the probe that was supposed to prove the
+  condition printed `60` for `60%` and looked correct. The condition is now arithmetic:
+  `#{m:-*,#{e|-|:#{client_width},100}}` is "narrower than 100 columns".
+- **2026-08-20 (executor — the popup overlay IS assertable, contra CLAUDE.md):** running
+  `TMUX= tmux -L <sock> attach -t work` *inside* another session's pane manufactures a real
+  attached client, so `display-popup` has somewhere to draw and `capture-pane` on the outer
+  pane captures the overlay, border included. DoD 9's popup evidence is therefore the real
+  thing — key pressed, overlay captured — not just an installed binding. CLAUDE.md's claim
+  to the contrary has been corrected.
+- **2026-08-20 (executor — DoD 11 measured, no optimisation):** the added write costs
+  nothing measurable (below), so the read-then-write-only-on-change variant was **not**
+  written, per Checkpoint 1.
+- **2026-08-20 (executor — DoD 10 needs the curator's call):** the 60-column floor and
+  "the footer keeps its version tail" cannot both hold for every build. See Evidence.
+
 
 ## Plan
 **Approach:** three layers, bottom-up, each fully testable before the layer above it exists.
@@ -236,3 +278,288 @@ driven by an injected command runner, so the bulk of the task never shells out.
 - **Deciding what the current session id is inside `internal/store`.** It must not: the
   store takes an id string and knows nothing about tmux. The seam is the same one the repo
   already keeps for scopes.
+
+## Evidence
+
+All output below is real, from this worktree (`../todo-tmux-integration`) on tmux 3.7b,
+go1.26.6, macOS arm64. Real-tmux legs run on private sockets (`tmux -L …`) with
+`XDG_DATA_HOME` pointed at a temp dir, so the user's database was never touched.
+
+### Tests, lint, build (DoD 12, 13)
+
+```
+$ make test
+ok  github.com/agusarias/tmux-todo/internal/cli     0.758s
+ok  github.com/agusarias/tmux-todo/internal/scope   1.623s
+ok  github.com/agusarias/tmux-todo/internal/store   1.065s
+ok  github.com/agusarias/tmux-todo/internal/task    1.116s
+ok  github.com/agusarias/tmux-todo/internal/tui     1.152s
+$ make lint            # go vet ./... + gofmt -l .
+(clean)
+$ go test ./... -count=1 -race
+(all ok)               # 315 tests total
+$ CGO_ENABLED=0 make build && otool -L bin/tdo
+bin/tdo:
+    /usr/lib/libSystem.B.dylib
+    /usr/lib/libresolv.9.dylib      # no libsqlite3
+$ ./bin/tdo doctor --db <temp>
+schema   2 (latest 2)
+journal  wal
+ok
+```
+
+Every new test uses a real SQLite file under `t.TempDir()`; every one that resolves a scope
+redirects the sticky-default state dir to a temp dir too.
+
+### The guards were checked by deleting the implementation
+
+A green test whose subject is gone proves nothing (CLAUDE.md). Each new guard was re-run
+against a mutated implementation and confirmed to fail:
+
+| mutation | test that failed |
+|---|---|
+| `RenameSession` drops the `scope_kind` predicate | `TestRenameSessionMovesTasks` |
+| `002_sessions.sql` deleted | `TestUpgradeFromV1KeepsTasks` |
+| `session_id` fetched by a second `display-message` | `TestResolveQueriesTmuxOnceForAllThreeFields` |
+| `SessionID` target loses its `=`…`:` wrapper | `TestSessionIDTargetsAnExactName` |
+| `openEnv` stops calling `recordSession` | `TestAddRecordsTheSessionMap` |
+| a failed map write is swallowed *silently* (no log) | `TestSessionMapFailureDoesNotFailTheCommand` |
+| a failed map write is made fatal | `TestSessionMapFailureDoesNotFailTheCommand` |
+| `session-renamed` uses `openEnv` instead of `openStore` | `TestSessionRenamedWhenItIsTheCurrentSession` |
+
+That last one is the guard worth knowing about. When the hook fires, the renamed session
+*is* the one the process runs in, so refreshing the map before reading it — which is exactly
+what `openEnv` does for every other command — records `$3 -> "new"` first, the lookup then
+finds the new name, concludes there is nothing to do, and orphans the tasks. Every other
+test in the file still passes under that mutation.
+
+### The rename, end to end on a real tmux server (DoD 3, 4, 7, 8, 9)
+
+Hook installed with `-a`, and a user's own hook survives it:
+
+```
+$ tmux -L tdorename set-hook -ga session-renamed "run-shell -b '<tdo> session-renamed'"
+$ tmux -L tdorename set-hook -ga session-renamed "display-message 'user hook still here'"
+$ tmux -L tdorename show-hooks -g | grep session-renamed
+session-renamed[0] run-shell -b "<tdo> session-renamed"
+session-renamed[1] display-message "user hook still here"
+```
+
+```
+== before the rename (session is 'oldname') ==
+  map:   $0 -> oldname
+  tasks: session:oldname=rebase onto main session:oldname=check CI global:=call the dentist
+
+== tmux rename-session -t oldname newname ==
+== after the rename ==
+  map:   $0 -> newname
+  tasks: session:newname=rebase onto main session:newname=check CI global:=call the dentist
+
+== tdo list, run from inside the renamed session ==
+  2 [ ] session:newname  check CI
+  1 [ ] session:newname  rebase onto main
+  3 [ ] global           call the dentist
+
+== renaming onto a name that already has tasks (design.md's accepted merge) ==
+  tasks: session:takenname=rebase onto main session:takenname=check CI
+         global:=call the dentist session:takenname=already under takenname
+```
+
+The merge is intentional (`design.md`: "a new session that reuses an old name inherits that
+name's tasks"). Two rows with the *same text* would sit next to each other after such a
+merge; `TestRenameSessionOntoExistingKeyMerges` pins that, and it is not a defect.
+
+No-op paths, silent:
+
+```
+== renaming a session tdo has never run in ==
+  tasks before=4/10 after=4/10  (unchanged: yes)
+  $ tdo session-renamed --verbose -- virgin2
+    session $2 is not in the map: nothing to move
+```
+
+Awkward names, with the argument-free hook (the injection canary is a file the payload
+tries to create):
+
+```
+  [start ] -> [a b   ] task under [a b   ] OK
+  [a b   ] -> [a"b   ] task under [a"b   ] OK
+  [a"b   ] -> [a'b   ] task under [a'b   ] OK
+  [a'b   ] -> [a$b   ] task under [a$b   ] OK
+  [a$b   ] -> [a;b   ] task under [a;b   ] OK
+  [a;b   ] -> [a`b   ] task under [a`b   ] OK
+  [a`b   ] -> [a#b   ] task under [a#b   ] OK
+  [a#b   ] -> [a:b   ] task under [a:b   ] OK
+  [a:b   ] -> [x'; touch /…/pwned; '] task under [x'; touch /…/pwned; '] OK
+  [x'; touch /…/pwned; '] -> [back to plain] task under [back to plain] OK
+
+  injection canary /…/pwned: absent — no injection
+  map: $0 -> back to plain
+```
+
+For the record, the *argument-passing* hook the plan specified was measured first and fails
+two of those: `a'b` (sh quoting — and that is the injection) and `a:b` (tmux target
+parsing). That is what moved the installed hook to the argument-free form.
+
+### The popup, actually opened (DoD 9, 10)
+
+`display-popup` needs an attached client, so one was manufactured: two sessions, and
+`TMUX= tmux -L <sock> attach -t work` run *inside* the first session's pane. The outer pane
+is then a real 80x24 client, `C-b T` is a real key press, and `capture-pane` sees the
+overlay.
+
+80x24 client — both dimensions below the floor, so the popup is 60x15:
+
+```
+  client 80x24, floor branch: w<100? yes h<25? yes
+         ┌──────────────────────────────────────────────────────────┐
+         │╭────────────────────────────────────────────────────────╮│
+         ││  tdo                                                   ││
+         ││                                                        ││
+         ││  ▸ ⌘ check CI                 (session: work)          ││
+         ││    ⌘ rebase onto main                                  ││
+         ││    · fix auth redirect        (dir: ~/workspace/todo)  ││
+         ││    ◉ call the dentist         (global)                 ││
+         ││                                                        ││
+         ││                                                        ││
+         ││                                                        ││
+         ││                                                        ││
+         ││  1/2/3 filter · j/k move · space done · q quit · vdev  ││
+         │╰────────────────────────────────────────────────────────╯│
+         └──────────────────────────────────────────────────────────┘
+```
+
+`j` then `space` moved the cursor and completed the row, and the store agrees
+(`select text from tasks where done=1` -> `check CI`); `q` closed the popup and the shell
+was back. The escapes ship — `capture-pane -pe` on the selected row:
+
+```
+  ││  ▸ ⌘ ^[[1mrebase onto main^[[0m                 ^[[2m(session: work)^[[0m  ││
+```
+
+120x40 client — above the floor, so the percentages govern (72x24 popup):
+
+```
+  client 120x40, floor branch: w<100? no h<25? no
+    │╭────────────────────────────────────────────────────────────────────╮│
+    ││  ▸ ⌘ check CI                             (session: work)          ││
+    ││    · fix auth redirect                    (dir: ~/workspace/todo)  ││
+    ││  1/2/3 filter · j/k move · space done · q quit · vdev              ││
+```
+
+Measured sizes, straight from the popup (`stty size` inside it):
+
+```
+  -w 60   -h 15   -> TUI pane 58x13     (the popup border costs 2x2)
+  -w 60%  -h 60%  -> TUI pane 46x12     on the same 80x24 client, for comparison
+```
+
+Note also the map row the popup wrote by itself — DoD 6 on the path that matters:
+`$1 -> work`, recorded by `tdo tui`'s own resolve.
+
+### DoD 10, the one item that needs a decision
+
+The floor holds: 60x15 on an 80x24 terminal, percentages above 100x25. The footer is a
+different matter. Its text is `49 + len(Version)` columns and the pane at the floor gives it
+52, so:
+
+| `Version` | footer columns | at the 60-col floor |
+|---|---|---|
+| `dev` (3) | 52 | fits exactly — captured above, `· vdev` intact |
+| `e91f97b-dirty` (13) | 62 | tail truncated: `· ve9…` |
+| `v0.1.0-3-gcf328ba-dirty` (23) | 72 | needs a 78-column popup |
+
+So "the footer keeps its version tail" is true for a `dev`-length stamp — which is the
+58-column minimum the Constraints quote — and false for a `git describe` stamp, which is
+what `make build` produces. The frame itself is correct in every case: nothing wraps,
+nothing scrolls, the truncation is `footer()`'s own `truncate` doing its job on the one line
+CLAUDE.md designates as the right thing to lose the tail of.
+
+Three ways out, none of which the executor should pick unilaterally: raise the floor to 78
+(contradicts the signed-off ~60x15 Decision), shorten the footer text, or accept the
+truncation and drop the clause from DoD 10. **Left for Checkpoint 2.**
+
+### Cold start with the added write (DoD 11)
+
+Both binaries built the same way, run inside a real tmux pane so session scope resolves and
+the write actually happens, 60 runs each, `before` = `main` at the claim commit:
+
+```
+tdo-before   count    n=60 median= 13.46ms p90= 16.85ms min= 12.55ms
+tdo-after    count    n=60 median= 13.37ms p90= 14.56ms min= 12.57ms
+tdo-before   list     n=60 median= 13.34ms p90= 14.07ms min= 12.17ms
+tdo-after    list     n=60 median= 13.82ms p90= 15.67ms min= 12.83ms
+```
+
+The write is in the noise — the `count` median is fractionally *lower* after. (The absolute
+number includes ~5ms of Python subprocess overhead, which is why it is above the repo's
+~8ms figure; both binaries carry the same overhead, so the delta is the measurement.) Budget
+is ~100ms. No optimisation written.
+
+One thing worth flagging for `tpm-plugin-and-install`: `tdo count` is the natural status-line
+command, and a status line re-runs it every few seconds — so this write lands on a much
+hotter path than the popup. It is free today; if a status-line integration ever makes it
+matter, the fix is `SessionName` first and `RecordSession` only when the name changed.
+
+### The install commands, verbatim (DoD 9)
+
+```tmux
+# The popup. ~60% x 60% with a 60x15 floor. display-popup does not expand formats in
+# -w/-h, so the floor is a branch; and the branch must use arithmetic, because
+# #{>=:x,y} compares strings ("80" >= "100" is true).
+bind-key T if-shell -F '#{m:-*,#{e|-|:#{client_width},100}}' {
+  if-shell -F '#{m:-*,#{e|-|:#{client_height},25}}' {
+    display-popup -E -w 60 -h 15 '/path/to/tdo tui'
+  } {
+    display-popup -E -w 60 -h 60% '/path/to/tdo tui'
+  }
+} {
+  if-shell -F '#{m:-*,#{e|-|:#{client_height},25}}' {
+    display-popup -E -w 60% -h 15 '/path/to/tdo tui'
+  } {
+    display-popup -E -w 60% -h 60% '/path/to/tdo tui'
+  }
+}
+
+# The rename hook. -ga, not -g, so a user's own hook survives. No argument and no format:
+# the child inherits $TMUX, whose session field is the one the hook fired for.
+set-hook -ga session-renamed "run-shell -b '/path/to/tdo session-renamed'"
+```
+
+`T` and the key name are `tpm-plugin-and-install`'s business (`@todo-key`), as is resolving
+`/path/to/tdo`. Two notes for that task: TPM re-runs the install script, and `-ga` *appends*,
+so hooks stack as `session-renamed[0]`, `[1]`, … — harmless, since the hook body is
+idempotent, but worth de-duplicating there rather than reverting to `-g`. And the brace form
+above needs `source-file` (or careful nested quoting) to install from a shell.
+
+### Definition of done
+
+1. ✅ `002_sessions.sql`, `SchemaVersion()` = 2, `doctor` shows `schema 2 (latest 2)`,
+   `TestUpgradeFromV1KeepsTasks` migrates a real v1 database with its tasks intact.
+   `TestConcurrentFirstOpenOfAV1Database` races eight *first* opens of that v1 file, which is
+   the window CLAUDE.md says matters.
+2. ✅ `RecordSession` / `SessionName`, clock-blind, `TestRecordSessionRoundTrip` freezes
+   `DB.now` and asserts `updated_at`.
+3. ✅ `RenameSession`, one statement in SQLite's own implicit transaction;
+   `TestRenameSessionMovesTasks` covers pending + done moving and dir/global/other-session
+   rows untouched (including a dir row whose key equals the old session key).
+4. ✅ `TestRenameSessionOntoExistingKeyMerges`, duplicate text included.
+5. ✅ `Resolved.SessionID` from a third line of the same format;
+   `TestResolveQueriesTmuxOnceForAllThreeFields` asserts on the recorded argv, so a second
+   subprocess fails it.
+6. ✅ `openEnv` records on every resolve — including `tdo tui`, which now goes through
+   `openEnv` for exactly that reason. Failure is swallowed and logged; the failure in the
+   test is real (the table is dropped), not stubbed.
+7. ✅ `tdo session-renamed -- "<name>"`, injected runner, no tmux server.
+8. ✅ all three no-op paths silent and 0, plus the real-tmux leg.
+9. ✅ commands above, installed and exercised on a real server; the popup was opened by a
+   real `C-b T` and captured.
+10. ⚠️ floor honoured and the size recorded; the footer clause holds for a `dev` stamp and
+    not for a `git describe` one. See above — needs a call.
+11. ✅ measured before and after; no regression.
+12. ✅ tests, vet, gofmt, static build, `otool -L`.
+13. ✅ real SQLite files under `t.TempDir()`; the state dir is redirected too.
+14. ✅ doc comments carry the per-package specifics; CLAUDE.md got the cross-cutting rules
+    (the `run-shell` interpolation trap, `set-hook -a`, the `display-popup` size traps, and
+    the nested-client capture technique that corrects its own earlier claim); `docs/design.md`
+    records the size floor and the v2 table.

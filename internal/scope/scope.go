@@ -50,6 +50,14 @@ type Resolver struct {
 type Resolved struct {
 	// Session is nil outside tmux or when the session name cannot be read.
 	Session *task.Scope
+	// SessionID is tmux's id for that session ("$3"), empty when there is none.
+	//
+	// It is not a scope key and must never become one: ids reset when the tmux
+	// server restarts, so filing tasks under an id would orphan every
+	// session-scoped task on reboot. It is here because the id *survives a
+	// rename* while the name — the actual key — does not, which is what lets the
+	// session-renamed hook recover the old key from the store's id -> name map.
+	SessionID string
 	// Dir is nil when no directory can be determined at all.
 	Dir *task.Scope
 	// Global is always present, always empty-keyed.
@@ -74,10 +82,11 @@ func Resolve() (Resolved, error) { return NewResolver().Resolve() }
 func (r Resolver) Resolve() (Resolved, error) {
 	out := Resolved{Global: task.Scope{Kind: task.ScopeGlobal}}
 
-	sessionName, panePath := r.queryTmux()
+	sessionName, panePath, sessionID := r.queryTmux()
 	if sessionName != "" {
 		out.Session = &task.Scope{Kind: task.ScopeSession, Key: sessionName}
 	}
+	out.SessionID = sessionID
 
 	path := panePath
 	if path == "" {
@@ -96,18 +105,20 @@ func (r Resolver) Resolve() (Resolved, error) {
 	return out, nil
 }
 
-// queryTmux reads the session name and the active pane's path in one
-// display-message call — two subprocesses would double the cost on a hot path.
-// Any failure yields empty strings; tmux being absent is not an error here.
-func (r Resolver) queryTmux() (sessionName, panePath string) {
+// queryTmux reads the session name, the active pane's path and the session id in
+// one display-message call — a second subprocess would double the cost on a hot
+// path, which is why the id is a third line of this format string rather than
+// its own query. Any failure yields empty strings; tmux being absent is not an
+// error here.
+func (r Resolver) queryTmux() (sessionName, panePath, sessionID string) {
 	if r.TmuxEnv == "" {
-		return "", ""
+		return "", "", ""
 	}
-	// A literal newline in the format string, so one call returns two lines.
-	const format = "#{session_name}\n#{pane_current_path}"
+	// Literal newlines in the format string, so one call returns three lines.
+	const format = "#{session_name}\n#{pane_current_path}\n#{session_id}"
 	out, err := r.run("tmux", "display-message", "-p", format)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	lines := strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n")
 	if len(lines) > 0 {
@@ -116,7 +127,46 @@ func (r Resolver) queryTmux() (sessionName, panePath string) {
 	if len(lines) > 1 {
 		panePath = strings.TrimSpace(lines[1])
 	}
-	return sessionName, panePath
+	if len(lines) > 2 {
+		sessionID = strings.TrimSpace(lines[2])
+	}
+	return sessionName, panePath, sessionID
+}
+
+// SessionID asks tmux for the id of the session called name.
+//
+// This is the rename hook's half of the id -> name map. The hook cannot pass the
+// id itself: #{session_id} expands to "$0", run-shell hands its argument to sh,
+// and sh expands $0 to its own name — so the hook passes the new *name* and the
+// binary looks the id up here. One subprocess, like Resolve's.
+//
+// The target is "=<name>:" — verified against tmux 3.7b, and neither half is
+// decoration. The "=" forces an exact name match, so a rename of "dev" cannot be
+// answered by a session called "dev-2" (tmux otherwise falls back to prefix and
+// then fnmatch matching). The trailing ":" is what makes the "=" work at all:
+// display-message takes a target-*pane*, so a bare "=dev" is parsed as a pane
+// name and resolves to nothing — and tmux reports that by printing an empty line
+// and exiting 0, not by failing. Hence the empty-output check below.
+//
+// A session name containing ":" cannot be targeted this way, because that is the
+// character tmux splits on. Such a rename is simply not recovered; the all-tasks
+// view's re-home is the fallback docs/design.md already provides.
+func (r Resolver) SessionID(name string) (string, error) {
+	if name == "" {
+		return "", errors.New("scope: empty session name")
+	}
+	if r.TmuxEnv == "" {
+		return "", fmt.Errorf("session id for %q: %w (not inside tmux)", name, ErrUnavailable)
+	}
+	out, err := r.run("tmux", "display-message", "-t", "="+name+":", "-p", "#{session_id}")
+	if err != nil {
+		return "", fmt.Errorf("session id for %q: %w", name, err)
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", fmt.Errorf("session id for %q: tmux reported no id (no such session, or a name tmux cannot target)", name)
+	}
+	return id, nil
 }
 
 func (r Resolver) run(name string, args ...string) ([]byte, error) {

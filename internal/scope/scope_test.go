@@ -13,8 +13,12 @@ import (
 	"github.com/agusarias/tmux-todo/internal/task"
 )
 
+// fakeSessionID is the id fakeTmux reports. Real tmux ids look like this.
+const fakeSessionID = "$7"
+
 // fakeTmux returns a Run that answers display-message with one call, the way
-// tmux does, and records how many times it was invoked.
+// tmux does, and records how many times it was invoked. The three lines are the
+// three fields queryTmux asks for, in order.
 func fakeTmux(t *testing.T, sessionName, panePath string, calls *int) func(string, ...string) ([]byte, error) {
 	t.Helper()
 	return func(name string, args ...string) ([]byte, error) {
@@ -24,7 +28,7 @@ func fakeTmux(t *testing.T, sessionName, panePath string, calls *int) func(strin
 		if name != "tmux" || len(args) < 2 || args[0] != "display-message" {
 			return nil, fmt.Errorf("unexpected command %s %v", name, args)
 		}
-		return []byte(sessionName + "\n" + panePath + "\n"), nil
+		return []byte(sessionName + "\n" + panePath + "\n" + fakeSessionID + "\n"), nil
 	}
 }
 
@@ -64,9 +68,171 @@ func TestResolveInsideTmux(t *testing.T) {
 	if got.Global.Kind != task.ScopeGlobal || got.Global.Key != "" {
 		t.Errorf("Global = %+v, want global with an empty key", got.Global)
 	}
+	if got.SessionID != fakeSessionID {
+		t.Errorf("SessionID = %q, want %q", got.SessionID, fakeSessionID)
+	}
 	// One subprocess, not two: this runs on the popup's hot path.
 	if calls != 1 {
 		t.Errorf("tmux was queried %d times, want 1", calls)
+	}
+}
+
+// TestResolveQueriesTmuxOnceForAllThreeFields is DoD 5: the session id rides on
+// the existing display-message rather than adding a second subprocess to the
+// popup's hot path. It asserts on the recorded argv, so folding the id in as a
+// separate call fails here even though Resolve would still return the right
+// values.
+func TestResolveQueriesTmuxOnceForAllThreeFields(t *testing.T) {
+	_, deep := repoFixture(t)
+	var argv [][]string
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,0",
+		Run: func(name string, args ...string) ([]byte, error) {
+			argv = append(argv, append([]string{name}, args...))
+			return []byte("pulsar\n" + deep + "\n$3\n"), nil
+		},
+	}
+
+	got, err := r.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(argv) != 1 {
+		t.Fatalf("Resolve ran %d commands, want exactly 1: %v", len(argv), argv)
+	}
+	call := argv[0]
+	if len(call) != 4 || call[0] != "tmux" || call[1] != "display-message" || call[2] != "-p" {
+		t.Fatalf("call = %v, want tmux display-message -p <format>", call)
+	}
+	format := call[3]
+	wantLines := []string{"#{session_name}", "#{pane_current_path}", "#{session_id}"}
+	if lines := strings.Split(format, "\n"); !slicesEqual(lines, wantLines) {
+		t.Errorf("format = %q, want the three fields one per line: %q", format, strings.Join(wantLines, "\\n"))
+	}
+	if got.SessionID != "$3" {
+		t.Errorf("SessionID = %q, want $3", got.SessionID)
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// A tmux too old to report an id, or a format that came back short, must leave
+// SessionID empty rather than inventing one — an empty id disables the rename
+// map for that invocation, which is the best-effort behaviour design.md wants.
+func TestResolveMissingSessionIDStaysEmpty(t *testing.T) {
+	_, deep := repoFixture(t)
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,0",
+		Run: func(string, ...string) ([]byte, error) {
+			return []byte("pulsar\n" + deep + "\n"), nil
+		},
+	}
+
+	got, err := r.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got.Session == nil {
+		t.Fatal("Session should still resolve without an id")
+	}
+	if got.SessionID != "" {
+		t.Errorf("SessionID = %q, want empty", got.SessionID)
+	}
+}
+
+// TestSessionIDTargetsAnExactName pins the rename path's one subprocess. Both
+// halves of the "=<name>:" target matter and were established against tmux 3.7b:
+// "=" forces an exact match, and the trailing ":" is what makes tmux read the
+// target as a session at all — "=dev" alone resolves to nothing and tmux says so
+// by printing an empty line and exiting 0.
+func TestSessionIDTargetsAnExactName(t *testing.T) {
+	var argv [][]string
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,0",
+		Run: func(name string, args ...string) ([]byte, error) {
+			argv = append(argv, append([]string{name}, args...))
+			return []byte("$4\n"), nil
+		},
+	}
+
+	id, err := r.SessionID("pulsar")
+	if err != nil {
+		t.Fatalf("SessionID: %v", err)
+	}
+	if id != "$4" {
+		t.Errorf("SessionID = %q, want $4 (trailing newline trimmed)", id)
+	}
+	if len(argv) != 1 {
+		t.Fatalf("SessionID ran %d commands, want 1: %v", len(argv), argv)
+	}
+	want := []string{"tmux", "display-message", "-t", "=pulsar:", "-p", "#{session_id}"}
+	if !slicesEqual(argv[0], want) {
+		t.Errorf("call = %v, want %v", argv[0], want)
+	}
+}
+
+// A session name with a space and a quote in it reaches tmux as one argv
+// element. There is no shell in this path, which is the whole reason the hook
+// passes a name and not an id — see the run-shell $0 trap in CLAUDE.md.
+func TestSessionIDPassesMetacharactersThrough(t *testing.T) {
+	const name = `it's a "session" $0; rm -rf`
+	var got []string
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,0",
+		Run: func(_ string, args ...string) ([]byte, error) {
+			got = args
+			return []byte("$5"), nil
+		},
+	}
+
+	if _, err := r.SessionID(name); err != nil {
+		t.Fatalf("SessionID: %v", err)
+	}
+	if len(got) != 5 || got[2] != "="+name+":" {
+		t.Errorf("target = %q, want %q verbatim in one argument", got, "="+name+":")
+	}
+}
+
+func TestSessionIDOutsideTmuxIsUnavailable(t *testing.T) {
+	r := Resolver{
+		TmuxEnv: "",
+		Run: func(string, ...string) ([]byte, error) {
+			t.Error("tmux was queried with $TMUX unset")
+			return nil, errors.New("no tmux")
+		},
+	}
+	if _, err := r.SessionID("pulsar"); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("SessionID outside tmux = %v, want ErrUnavailable", err)
+	}
+}
+
+func TestSessionIDErrors(t *testing.T) {
+	base := Resolver{TmuxEnv: "/tmp/tmux/default,1,0"}
+
+	if _, err := base.SessionID(""); err == nil {
+		t.Error("SessionID accepted an empty name")
+	}
+
+	failing := base
+	failing.Run = func(string, ...string) ([]byte, error) { return nil, errors.New("can't find session") }
+	if _, err := failing.SessionID("gone"); err == nil {
+		t.Error("SessionID swallowed a tmux failure")
+	}
+
+	silent := base
+	silent.Run = func(string, ...string) ([]byte, error) { return []byte("  \n"), nil }
+	if _, err := silent.SessionID("pulsar"); err == nil {
+		t.Error("SessionID accepted an empty id as success")
 	}
 }
 
