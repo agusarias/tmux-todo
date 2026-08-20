@@ -1,7 +1,7 @@
 # Scope Resolution
 
-**Status:** in-progress
-**Worktree:** /Users/agusarias/workspace/todo-scope
+**Status:** review
+**Worktree:** none (removed after merge)
 
 ## Goal
 Resolve the three independent scopes for the current context: `global`, `dir` (active
@@ -106,6 +106,35 @@ the Decisions log below and testing them directly.
   the fallback kind is `session` when in tmux, else `dir`. Design does not specify one;
   confirmed explicitly at Checkpoint 1 over `dir`-always and `global`-always.
 
+- **2026-08-20 (executor):** No wall-clock assertion in the timing test. The plan's DoD 11
+  wanted the number recorded, and a `> 10ms` failure would fire on roughly one run in ten
+  (measured tail: 12.07ms) — the scaffold task already set the precedent that a flaky timing
+  threshold trains everyone to ignore the suite. The test logs the number and the budget is
+  audited from Evidence; only a >1s result fails it, since that is a hang, not latency.
+- **2026-08-20 (executor):** Measured the timing across 12 fresh processes rather than once.
+  The first development sample read 14.7ms — over budget — and turned out to be a cold-page
+  first `exec`, not the steady cold cost (median 5.7ms). One sample would have either failed
+  the DoD wrongly or, taken warm, passed it wrongly.
+- **2026-08-20 (executor):** The tmux subprocess is ~4.8ms of the ~5.7ms; the git walk is
+  0.02–0.1ms. The plan's stated remedy if over budget (one `display-message` instead of two)
+  was already implemented, so the *next* lever — noted for
+  tmux-integration-and-rename-hook, not done here — is having tmux expand `#{session_name}`
+  and `#{pane_current_path}` straight into the `display-popup` command line, removing the
+  subprocess entirely. Deliberately not built now: it needs the keybind that task owns, and
+  building the env-var half early would ship unused API on a guess.
+- **2026-08-20 (executor):** Extended the agreement test with a real submodule leg beyond
+  DoD 7's letter, because the plan listed submodule behaviour as an assumption to confirm.
+  Git agrees a submodule is its own repository, so the rule stands as designed.
+- **2026-08-20 (executor):** Added `Resolved.Has(kind)` alongside `Lookup` — the degradation
+  logic needs an availability check and reading it off an error was worse at the call site.
+- **2026-08-20 (executor, flag for the curator):** `CLAUDE.md` is now 98 lines against
+  taskflow's 60-line aim, after 72 at the store task and 58 at the scaffold. My additions are
+  compressed as far as they usefully go; the trend is structural, since each task legitimately
+  contributes a hard-won pitfall. Worth a curator decision before the remaining six tasks land:
+  either accept a longer file, or move per-package detail into the package doc comments (which
+  already carry most of it) and keep CLAUDE.md to commands, layout and cross-cutting rules.
+  Not restructuring it unilaterally — it is not this task's scope.
+
 ## Plan
 Single package, `internal/scope`, replacing the doc-only stub. No other package changes —
 the CLI and TUI wire-up belongs to their own tasks.
@@ -169,3 +198,138 @@ trustworthy. (3) `Resolver`/`Resolved` with a fake `Run` for tmux. (4) Sticky de
 `git_test.go` fixtures. DoD 7 → agreement test. DoD 8–9 → `sticky_test.go` against
 `t.TempDir()`. DoD 10 → `make test`, `make lint`, `make build` + `otool -L`. DoD 11 →
 benchmark output. Plus the manual tmux check from a `../todo-*` worktree.
+
+## Evidence
+
+Executed 2026-08-20 in worktree `/Users/agusarias/workspace/todo-scope`
+(branch `scope-resolution`, rebased onto `main`, merged and removed).
+
+**Merge commit: `03d96c4`** — fast-forward onto `main`, 7 files, `doc.go` replaced
+by `scope.go` / `git.go` / `sticky.go` plus three test files. Not pushed. Review
+with `git show 03d96c4`.
+
+Rebased rather than merged with a commit: the curator landed the store task's
+close-out on `main` mid-flight, and a fast-forward keeps `git show <hash>` honest.
+
+### `go test ./internal/scope/ -v` — 28 tests, all passing
+
+```
+--- PASS: TestDirKeyFromGitDirectory                      --- PASS: TestResolveInsideTmux
+--- PASS: TestDirKeyFoldsWorktreeIntoMainRepo   <- DoD 4   --- PASS: TestResolveOutsideTmuxHasNoSession   <- DoD 1,3
+--- PASS: TestDirKeyHandlesRelativeGitdir                  --- PASS: TestResolveFallsBackWhenTmuxQueryFails <- DoD 2
+--- PASS: TestDirKeySubmoduleKeepsItsOwnRoot               --- PASS: TestResolveEmptySessionNameStaysAbsent <- DoD 3
+--- PASS: TestDirKeyIgnoresWorktreesSegmentOutsideGitDir   --- PASS: TestResolveWithNoPathAtAll           <- DoD 2
+--- PASS: TestDirKeyWithoutRepoIsLiteral        <- DoD 5   --- PASS: TestResolveIgnoresUnresolvablePanePath
+--- PASS: TestDirKeyIsSymlinkStable             <- DoD 6   --- PASS: TestActiveIsInTierOrder
+--- PASS: TestDirKeyRejectsMissingPath                     --- PASS: TestLookupUnknownKind
+--- PASS: TestDirKeyHasNoTrailingSeparator      <- DoD 6   --- PASS: TestResolveAgainstRealEnvironment    <- DoD 11
+--- PASS: TestParseGitFileErrors                           --- PASS: TestStickyDefaultRoundTrip           <- DoD 8
+--- PASS: TestAgreesWithGitBinary (0.33s)       <- DoD 7   --- PASS: TestStickyDefaultFallbackWithNothingStored
+--- PASS: TestStickyDefaultDegrades             <- DoD 9   --- PASS: TestStickyDefaultToleratesBadFiles   <- DoD 8
+    (6 subtests, one per degradation row)                  --- PASS: TestStickyDefaultMissingDirectoryIsNotAnError
+--- PASS: TestSetStickyDefaultIsAtomic          <- DoD 8   --- PASS: TestSetStickyDefaultRejectsUnknownKind
+--- PASS: TestStateDirHonoursXDG                           ok  internal/scope  0.537s
+```
+
+Every test the Verification section named by name is present and passing:
+worktree-folding, symlink-identity, no-repo-literal-path, outside-tmux absence,
+sticky round trip and sticky degradation.
+
+### DoD 7 — the git agreement test ran, it did not skip
+
+`TestAgreesWithGitBinary` took 0.33s, which is the `git init` / `commit` /
+`worktree add` / `submodule add` fixture doing real work; a skip is 0.00s. It
+builds a repo, a linked worktree and a submodule, then compares `DirKey` against
+the real binary:
+
+- inside the repo and a nested dir → `git rev-parse --show-toplevel`
+- inside the linked worktree → `dirname` of `git rev-parse --git-common-dir`,
+  and asserts we do **not** return the worktree's own `--show-toplevel`
+- inside the submodule → `git rev-parse --show-toplevel`, and asserts we do
+  **not** fold it into the parent
+
+The submodule leg goes beyond DoD 7's letter on purpose: the plan flagged
+submodule behaviour as an assumption to confirm or refute against real git. It is
+confirmed — git also treats a submodule as its own repository, so "the submodule
+gets its own list" is agreement, not divergence.
+
+### Manual check from a real tmux pane (Verification, last bullet)
+
+A fresh session named `scope-check`, started in the worktree:
+
+```
+$ tmux display-message -p -t scope-check '#{session_name} :: #{pane_current_path}'
+scope-check :: /Users/agusarias/workspace/todo-scope
+
+$ /tmp/scope.test -test.run TestResolveAgainstRealEnvironment -test.v
+    resolved in 10.314334ms (TMUX="/private/tmp/tmux-501/default,37572,43")
+      session: session=scope-check
+      dir:     dir=/Users/agusarias/workspace/todo
+--- PASS
+```
+
+tmux reports the pane inside `todo-scope`; resolution returns the **parent repo**
+`/Users/agusarias/workspace/todo` and the session name alone. That is DoD 4's
+headline case verified against the live repository rather than a fixture.
+
+### DoD 11 — timing, and what it actually costs
+
+Cold resolution, 12 fresh processes (first `Resolve` in each, so the subprocess is
+included and nothing is warm):
+
+```
+4.86  4.88  4.99  5.02  5.11  5.25  6.20  6.31  6.35  8.26  9.08  12.07   (ms)
+median 5.7ms   ·   11 of 12 under 10ms   ·   one outlier at 12.07ms
+```
+
+Steady state and the breakdown:
+
+```
+BenchmarkResolve-8   30   4.62–6.25 ms/op      (dominated by the tmux subprocess)
+BenchmarkDirKey-8    30   0.021–0.107 ms/op    (the pure-Go walker)
+tmux display-message, 20 runs: median 4.8ms, min 4.3, max 7.1
+```
+
+So the ~10ms budget is met at the median with ~4ms of headroom, and the honest
+caveat is that the tail touches 12ms on a busy machine. Essentially all of it is
+the one `tmux display-message`; the git walk is 0.02–0.1ms. The first measurement
+taken during development read 14.7ms, which was a cold-page-cache first `exec` and
+is not representative — it is recorded here because it is what prompted measuring
+the distribution instead of trusting one sample.
+
+### Whole repo
+
+```
+$ gofmt -l .            (no output)
+$ go vet ./...          (no output)
+$ go test ./... -count=3
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.561s
+ok  	github.com/agusarias/tmux-todo/internal/scope	1.280s
+ok  	github.com/agusarias/tmux-todo/internal/store	0.649s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.869s
+ok  	github.com/agusarias/tmux-todo/internal/tui	0.697s
+
+$ CGO_ENABLED=0 make build && otool -L bin/tdo
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib          (7.1M, unchanged — no new deps)
+```
+
+`internal/scope` was the last package with no test files; only `cmd/tdo` remains,
+and it is three lines delegating to `internal/cli`.
+
+### Definition of done
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Three axes, absent rather than empty-keyed, Global always present | met |
+| 2 | Pane path from tmux, `os.Getwd` fallback, absent when neither works | met — three tests |
+| 3 | Session from `#{session_name}`, absent outside tmux, never empty | met |
+| 4 | Pure-Go walker; `.git` dir, `.git` file, `worktrees/` → main repo | met — and verified live from a real worktree |
+| 5 | No repo above → literal path | met |
+| 6 | Absolute, cleaned, symlink-resolved, no trailing sep, no case folding | met — symlink-identity test |
+| 7 | Agreement test vs the git binary, skipped only if git is absent | met — ran, plus a submodule leg |
+| 8 | Sticky *kind* in XDG state dir, atomic write, tolerant read, round trip | met |
+| 9 | Degradation session → dir → global | met — 6-row table test |
+| 10 | `go test` / `go vet` / `gofmt` clean; no libsqlite3 | met |
+| 11 | Timed resolution recorded, within ~10ms | met at the median (5.7ms); tail to 12ms disclosed above |
