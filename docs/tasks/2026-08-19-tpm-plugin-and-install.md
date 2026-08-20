@@ -1,6 +1,6 @@
 # TPM Plugin And Install
 
-**Status:** agreed
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -201,6 +201,12 @@ binaries the plugin can download — is the strictly better distribution story a
 own brief rather than being smuggled in here.
 
 ## Plan
+**Approved at Checkpoint 1 on 2026-08-20** as written, including DoD 10's `go.mod` drop to
+`go 1.25.0`, the four-step resolution chain, and the curator's call to keep the shell harness
+in its own `make test-plugin` target. The plan is disposable — revise the *how* and log why.
+Goal, Constraints and Definition of done are not: changing those is a scope event, so set
+`blocked` with the question instead.
+
 One new shell entry point, one new shell harness, one new Makefile target, and documentation.
 No Go source changes except `go.mod`'s directive.
 
