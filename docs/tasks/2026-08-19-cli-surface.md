@@ -116,6 +116,12 @@ a one-line command, so id handling and the not-found path must be exact.
   for the plan: `env` must hold a `scope.Resolver`, not just a `scope.Resolved` — it needs the
   receiver for both `StickyDefault` and `SetStickyDefault`. Also note `Resolved.Has` was added
   post-plan and `Resolved.Active()` is what feeds `store.Filter.Scopes`.
+- **2026-08-20 (curator, SCOPE EVENT — user signed off):** **DoD 9 is struck.** It required
+  every invocation to call `store.PurgeDone` with a 24h cutoff. `completed-task-lifecycle`
+  resolved its own self-contradictory brief as **hide-only: done rows are bounded in the view
+  and never deleted**, so an automatic 24h delete here would destroy rows before the view rule
+  ever mattered. `PurgeDone` keeps no caller; it stays a store primitive for a possible
+  explicit `tdo purge`. Do not reintroduce a purge call in this task.
 ## Plan
 All work in `internal/cli`; no new packages, no changes to `store` or `scope`.
 
