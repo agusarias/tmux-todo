@@ -1,6 +1,6 @@
 # TPM Plugin And Install
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged and removed)
 
 ## Goal
@@ -74,8 +74,18 @@ No migrations, no database access, no network.
    nothing rather than binding something that will fail on press — a dead keybind is a worse
    failure than a clear message, because it looks like the plugin's fault at press time
    rather than at install time.
-4. The steady-state run (binary already resolvable at step 1 or 2) does no build and no
-   network, and adds no measurable time to tmux startup. Measured, with the number recorded.
+4. The steady-state run (binary already resolvable at step 1 or 2) does no build, no
+   network, and no write, and produces no output at all. Its cost is bounded at ~50ms per
+   tmux **server** start — not per session, window, keypress or popup. Measured, with the
+   number recorded.
+
+   *(Reworded at Checkpoint 2, 2026-08-20, with the user's sign-off. The original clause said
+   "adds no measurable time to tmux startup", which was unachievable by construction: any
+   plugin that talks to tmux at all pays a round-trip per call. The curator wrote a clause
+   that could not be satisfied; the executor measured ~31ms across four round-trips and
+   escalated rather than quietly satisfying or dropping it, which is the correct handling. The
+   substance the clause was reaching for — no build, no network, silent — holds and is
+   proven.)*
 
 **Configuration**
 5. `@todo-key` is read via `tmux show-option -gqv @todo-key`, defaults to `t` when unset or
@@ -666,3 +676,68 @@ read the diff with `git show 41646a6` or `git log -1 -p e41a85e`. **Not pushed.*
 re-run on `main` after the merge and are green there too; `git ls-files -s` on `main` confirms
 both shell files at mode **100755**.
 
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `e41a85e` stays on local `main`; not pushed.
+
+**All 13 DoD items met**, with item 4 reworded above under the user's sign-off. `design.md`'s
+**v1 cut line is now complete**: three scopes, merged popup, add/edit/complete/delete/re-scope,
+all-tasks view with sesh jump, rename hook, full CLI with `--json`, TPM plugin.
+
+**Independently reproduced by the curator on current `main`**, not read from the Evidence
+section: `make test-plugin` → **45 passed, 0 failed**; `go.mod` at `go 1.25.0` with the Go
+suite green; `tmux-todo.tmux` committed **mode 100755**; the harness's own steady-state timing
+reported 41ms/run over 20 runs, consistent with the ~31ms delta measured against a baseline.
+
+**The mutation was reproduced too, because it is the item that carries the task.** Idempotence
+assertions pass trivially against a script that installs nothing, so the guard had to be shown
+load-bearing. Rewriting `install_hook`'s body grep as a *name* grep: **39 passed, 6 failed**,
+hook count 0 on every run of every case. That is the trap the grill found, in code, failing in
+the dangerous direction — a name grep matches tmux's bare `session-renamed` line on a fresh
+server, so the install is silently skipped and the rename is broken with no error anywhere.
+
+**The executor improved on this brief in two places, and was right both times.**
+
+1. **The hook grep is path-*specific*, not path-blind.** The brief specified path-blind and
+   explicitly "accepted" a stale-hook gap. That was wrong: with a path-blind grep, an install
+   at a new path *matches the stale hook from the old path and skips itself*, leaving only the
+   broken one. Path-specific inverts the failure into a harmless stale hook beside a working
+   one. The curator's "accepted limitation" was worse than the thing it accepted.
+2. **The previous task's handoff claim was disproved.** `tmux-integration-and-rename-hook`
+   recorded that the `if-shell` brace form "needs `source-file` or careful nested quoting" to
+   install from a shell. It does not: passing the whole block as one argument to `bind-key`
+   hands tmux's own parser exactly the text it wants, and `list-keys` renders it
+   byte-identically. No temp file, no escaping — a simplification the plan had budgeted
+   complexity for.
+
+**The harness was proven able to fail before it was trusted** — the plan's step 2 — and that
+caught three bugs that would have made the whole suite vacuous. The best of them: **tmux's
+default prefix table already binds `t` and `w`**, so counting bindings for a key counted
+tmux's own and **passed with the plugin deleted**. Key assertions now count bindings whose
+*command* is the plugin's, plus a total-per-key check. This is the third time in this project
+that "write the guard, then delete its subject" has caught a guard that proved nothing.
+
+**Outcome 4 is demonstrated rather than asserted**: with no binary and no `go`, `t` still
+carries tmux's own `clock-mode`. The plugin bound nothing rather than binding something that
+fails on press, which was DoD 3's whole point.
+
+**Accepted limitations, recorded so they are not mistaken for defects.** A plugin path
+containing `'` or `"` is treated as a resolution failure rather than a keybind that breaks on
+press, because tmux's single-quoted strings have no escape character. A moved plugin dir
+leaves one harmless stale hook beside the working one. And the two *reads* cannot be combined
+into one round-trip — `show-option -gqv` on an unset option prints nothing at all, so the
+response cannot be split by line; only the two writes could be merged, which was declined as
+complexity that would not make the old clause true anyway.
+
+**CLAUDE.md:** no curator additions needed. The executor recorded all of it, including the
+bare-`session-renamed`-line trap with both mutation directions and the path-specific
+requirement, the `t`/`w` default-binding trap, the sandboxed-`PATH`-is-a-vacuous-test-machine
+lesson, the `show-option -gqv` empty-output finding, and the correction to the brace-form
+handoff.
+
+**Downstream:** `2026-08-20-release-binaries-and-ci.md` (`draft`) is the natural successor —
+the plugin's resolution chain ends in a source build only because there is nothing to
+download, and that brief carries the OPEN question of whether a downloaded binary should be
+preferred over a source build once releases exist.
+
+**Worktree:** `../todo-tpm-plugin-and-install` removed by the executor before this checkpoint.
