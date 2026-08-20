@@ -1,7 +1,7 @@
 # Popup TUI Merged List
 
-**Status:** ready
-**Worktree:** none
+**Status:** review
+**Worktree:** /Users/agusarias/workspace/todo-popup-tui-merged-list
 
 ## Goal
 The default popup view: session, dir and global tasks merged into one list with a per-row
@@ -153,6 +153,36 @@ overlay remains unverifiable headlessly regardless (CLAUDE.md), and lands with
 - **2026-08-20 (curator, Checkpoint 1 APPROVED):** Plan signed off as written, including the
   accepted glyph risk and the footer reading of `design.md:71`. Status `ready`.
 
+- **2026-08-20 (executor):** `Config.Scopes` is fed from `scope.Resolved.Active()` in
+  `internal/cli`, not from the hardcoded global-only placeholder the plan's step 1 called
+  for. The plan wrote that placeholder while `scope-resolution` was `in-progress`; that code
+  is now merged on `main`, and `Active()` already returns exactly the tier-ordered
+  `[]task.Scope` this task's `Config` wants. Using it satisfies DoD 1's "internal/cli
+  resolves and injects" instead of deferring it, and leaves the `internal/tui` →
+  `internal/scope` boundary untouched (resolution stays in `cli`). Revising the *how*, not
+  the *what*.
+- **2026-08-20 (executor):** The tier label triggers on a change of **scope** (kind *and*
+  key), not merely of tier. With one scope per tier — what `cli` injects — this is identical
+  to DoD 5. It differs only if two scopes of the same kind are ever active, where reusing
+  the first one's label would attribute tasks to the wrong repo. `TestTierLabelOnFirstRowOf
+  EachTierOnly` pins the DoD case; `TestLabelRepeatsForANewScopeInTheSameTier` pins the
+  extension.
+- **2026-08-20 (executor):** Strike-through is asserted on the **style object**
+  (`textStyle(...).GetStrikethrough()`), not on rendered output. A test process has no
+  colour profile, so lipgloss renders every style down to plain text and an ANSI-level
+  assertion passes whatever style is chosen — the first version of that test was green
+  against a deliberately wrong implementation. The real-terminal capture below is what
+  proves the escapes actually ship.
+- **2026-08-20 (executor):** A cursor marker (`▸ `, with a two-column blank standing in for
+  it) was added, which the `design.md` mock does not show. Colour alone would have been
+  invisible both in a no-profile test and to the assertion above; the mark keeps the glyph
+  column stable whether or not a row is selected.
+- **2026-08-20 (executor):** Real-terminal verification **was** run, contrary to the
+  Verification section's expectation that it could not be. That section ruled it out because
+  `tdo tui` has no `--db` flag, but `store.DefaultPath` honours `$XDG_DATA_HOME`, which makes
+  a throwaway database reproducible without one. It earned its keep: it caught three defects
+  the headless tests could not see (see Evidence).
+
 ## Plan
 **Approach:** replace the placeholder model with a real list model that is a pure function
 of injected data. No tmux, no scope resolution and no clock inside `internal/tui` — the
@@ -199,3 +229,188 @@ rather than a concession.
   hardcoding 60%x60%, since sizing belongs to `tmux-integration-and-rename-hook`.
 - **Cold start regression.** Adding `bubbles` and real querying to a path currently
   budgeted at ~8ms against ~100ms; step 7 measures rather than assumes.
+
+## Evidence
+
+Toolchain: `go1.26.6 darwin/arm64` from `/opt/homebrew/bin/go`.
+
+### Tests
+
+`make test` — all packages pass; `internal/tui` goes from 3 placeholder tests to 38.
+
+```
+$ make test
+go test ./...
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.236s
+ok  	github.com/agusarias/tmux-todo/internal/scope	(cached)
+ok  	github.com/agusarias/tmux-todo/internal/store	(cached)
+ok  	github.com/agusarias/tmux-todo/internal/task	(cached)
+ok  	github.com/agusarias/tmux-todo/internal/tui	0.521s
+```
+
+`make lint` (`go vet ./...`) clean; `gofmt -l .` empty.
+
+### The two traps the brief named, mutation-tested
+
+A passing test proves nothing until it has been seen to fail, so each guard was
+re-run against a deliberately broken implementation.
+
+**DoD 2 — the `internal/tui` → `internal/scope` boundary.** Adding that import:
+
+```
+--- FAIL: TestDoesNotImportScope
+    tui_test.go:143: internal/tui reaches internal/scope:
+      github.com/agusarias/tmux-todo/internal/tui -> github.com/agusarias/tmux-todo/internal/scope
+```
+
+The test walks the module-local import graph transitively (`go/parser`, no subprocess),
+so a *transitive* reintroduction fails too, and it self-checks that the walk actually
+reached `internal/store` rather than silently finding nothing.
+
+**DoD 3 — `Filter.Scopes` left empty meaning "every scope in the database".** Removing
+the empty-set short circuit:
+
+```
+--- FAIL: TestEmptyConfigScopesShowsNothing
+    rows = ["session task" "global task"], want none for an empty scope set
+--- FAIL: TestFilterOnUnavailableTierIsEmpty
+    rows = ["a session task" "global task"], want none: no session scope is active
+```
+
+And dropping `Scopes` from the filter entirely:
+
+```
+--- FAIL: TestQueryIsScopedToConfig
+    rows = ["someone else's session" "mine" "another repo"], want only [mine]: the filter leaked to inactive scopes
+--- FAIL: TestFilterKeysNarrowToOneTier
+    "1" filtered to ["session task" "dir task" "global task"], want only [session task]
+```
+
+**DoD 4 — no re-sorting in the view.** Adding an alphabetical sort to `renderRows`:
+
+```
+--- FAIL: TestRenderOrderMatchesStore
+    row 0 = "▸ · dir newer …", want the text "session only" from List position 0
+```
+
+### Real-terminal capture — and the three defects it caught
+
+The brief expected this to be impossible. It is not: `store.DefaultPath` honours
+`$XDG_DATA_HOME`, so a seeded throwaway database plus `tmux new-session` +
+`capture-pane` gives a reproducible check with no `--db` flag and without touching the
+user's real database. **This found three defects that every headless test missed**, which
+is the most useful thing in this report:
+
+1. **The frame was taller than the pane.** `chromeHeight` counted the title, footer and
+   blank lines but not the box's two border rows, and `View` added a trailing newline on
+   top. The frame overflowed by three rows, and because a terminal scrolls rather than
+   clips, the rows that vanished were the *top* ones — the session tier and every tier
+   label, i.e. exactly what the merged view exists to show. Headless tests asserted on
+   `renderRows`, which was correct throughout; nothing measured the assembled frame.
+2. **Tier labels vanished entirely for real dir keys.** A dir scope key is an absolute
+   path, and labels were given only the width left over after the text. A long path made
+   that budget negative, the row overflowed, and the viewport clipped the label away —
+   silently. The headless test used `~/ws/pulsar`, which fits. Fixed by giving labels a
+   guaranteed share (`columns`), left-truncating them so the identifying tail survives,
+   and holding every row to its width. Regression tests: `TestLabelSurvivesALongDirKey`,
+   `TestRowsNeverExceedTheirWidth`.
+3. **The box resized as content changed**, so filtering visibly redrew the border at a
+   different width. The box is now pinned to the popup width.
+
+After the fixes, at 80x20 with tasks seeded across all three scopes:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  tdo                                                                         │
+│                                                                              │
+│  ▸ · fix auth redirect  …8-b114-4afa-8794-06f48a8fdc60/scratchpad/xdg/repo)  │
+│    · write migration                                                         │
+│    ◉ call the dentist   (global)                                             │
+│                                                                              │
+│  1/2/3 filter · j/k move · q quit · vb05f98e-dirty                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+Live key checks in that pane:
+
+- `3` → `filter: global` in the title, one row; `3` again → merged list back.
+- `1` (no session scope active) → `no session tasks — press 1 again for all scopes`,
+  the filtered empty state, distinct from the unfiltered `no tasks yet`.
+- `j`/`k` move the `▸` marker and clamp at the last row (`j` at the end is inert).
+- `x` does nothing and does not quit; `q` exits and the pane closes.
+- Strike-through is real in the terminal, not just in the style object — raw escapes on
+  the completed row (`capture-pane -pe`), where `SGR 9` is strikethrough:
+
+```
+· ^[[2;9mwrite^[[0;9m ^[[2mmigration^[[0m
+```
+
+### Static binary (DoD 18)
+
+```
+$ CGO_ENABLED=0 make build
+$ otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+```
+
+No `libsqlite3` — the pure-Go driver claim still holds.
+
+### Cold start (~100ms budget)
+
+| path | measured |
+|---|---|
+| `tdo version` — bare process start, 30 runs | 8.42 ms/run |
+| `tdo doctor --db` — process + `store.Open` + migrate check + 2 counts, 30 runs | 8.49 ms/run |
+| popup first frame (`New` + `Init`'s query + `View`) over **200** tasks, 200 runs | 1.913 ms/run |
+
+Roughly **10ms** to a drawn first frame, against a 100ms budget. Adding `bubbles` and real
+querying cost nothing measurable. The first-frame figure came from a temporary probe, not a
+committed test — a wall-clock assertion would be flaky in CI.
+
+### Not verified
+
+- **Ambiguous-width terminals.** `⌘` (U+2318) and `◉` (U+25C9) are East-Asian *ambiguous*
+  width; under `ambiguous-width=double` they take two cells and the columns shift. The
+  capture above ran in a normal-width terminal, so this remains the accepted risk the brief
+  recorded, now with a `capture-pane` harness available to check it whenever
+  `tmux-integration-and-rename-hook` wants to.
+- **The `display-popup` overlay itself**, which needs an attached client (CLAUDE.md). The
+  checks above run the TUI in a plain tmux pane instead.
+
+## Blocking finding for another task — `internal/scope`
+
+Not this task's code, and deliberately **not fixed here**: `internal/scope` is the
+`scope-resolution` task, currently sitting in `review`, and editing code mid-audit would
+muddy that task's Checkpoint 2 diff. Flagging it for the curator to fold into that review.
+
+**Session scope never resolves in the shipped binary.** `scope.Resolve()` — the production
+entry point — is `Resolver{}.Resolve()`, a zero value, so `TmuxEnv` is `""`; `queryTmux`
+treats empty `TmuxEnv` as "not inside tmux" and returns before ever running
+`tmux display-message`. The doc comment on `Resolver` says "Its zero value talks to the real
+one", which is what the code does not do. Only the *tests* populate the field, from
+`os.Getenv("TMUX")` (`scope_test.go:230,278`) — so the suite is green while production is
+broken.
+
+Probed from inside a real tmux session:
+
+```
+TMUX="/private/tmp/tmux-501/default,37572,54"
+Resolve().Session                   = <nil>
+Active()                            = [{dir /Users/agusarias/workspace/todo} {global }]
+Resolver{TmuxEnv: $TMUX}.Session    = &{session tdoprobe}
+```
+
+Consequence for this task: the popup renders the session tier correctly (headless tests
+cover it), but on a real machine no session task can ever appear, because `Active()` never
+returns a session scope. The one-line fix belongs in `internal/scope`:
+
+```go
+func Resolve() (Resolved, error) { return Resolver{TmuxEnv: os.Getenv("TMUX")}.Resolve() }
+```
+
+That also wants a test which fails against the zero value — the present suite cannot catch
+this class of bug, since every case supplies `TmuxEnv` by hand.
+

@@ -8,8 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"runtime"
 
+	"github.com/agusarias/tmux-todo/internal/scope"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/tui"
 )
@@ -53,17 +55,57 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// runTUI opens the popup. Everything environment-dependent is resolved here and
+// injected: internal/tui never asks tmux or the filesystem anything, which is
+// what keeps its Update/View testable headlessly.
 func runTUI(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if err := tui.Run(Version); err != nil {
+
+	path, err := store.DefaultPath()
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	db, err := store.Open(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+	defer db.Close()
+
+	resolved, err := scope.Resolve()
+	if err != nil {
+		fmt.Fprintf(stderr, "tdo: %v\n", err)
+		return 1
+	}
+
+	// Active() is already in the merged list's tier order (session, dir,
+	// global), skipping whatever this context has no scope for.
+	cfg := tui.Config{
+		DB:      db,
+		Scopes:  resolved.Active(),
+		Home:    homeDir(),
+		Version: Version,
+	}
+	if err := tui.Run(cfg); err != nil {
 		fmt.Fprintf(stderr, "tdo: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// homeDir is used only to abbreviate dir scope keys for display, so failing to
+// find it degrades to showing absolute paths rather than to an error.
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 // runDoctor exercises the whole stack end to end: it resolves the data dir,
