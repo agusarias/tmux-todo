@@ -127,8 +127,11 @@ only** — so this is yours to decide:
   `env -u TMUX`", and leave the hang to (b).
 
 I have not touched `internal/cli`. The branch `tmux-regression-guard` holds the finished
-`internal/scope` work and is **not merged**, so whichever way this goes, nothing has to be
-undone.
+`internal/scope` work as commit **`aabfac5`** and is **not merged**, so whichever way this
+goes, nothing has to be undone. Read it with `git show aabfac5`; the worktree
+`../todo-tmux-regression-guard` is still in place, so the executor can resume there once
+this is answered. The branch touches `internal/scope/scope_test.go` and nothing else, and
+the brief lives only on `main`, so a later merge cannot conflict.
 
 
 ## Decisions
