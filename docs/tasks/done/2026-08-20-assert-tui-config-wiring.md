@@ -1,6 +1,6 @@
 # Assert What `tui.Config` Is Actually Wired With
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged and removed)
 
 ## Goal
@@ -275,3 +275,49 @@ Go in `internal/cli`, which that harness does not touch.
 **Merge commit:** `23c91ac` — `git show 23c91ac` / `git log -1 -p 23c91ac` for the diff.
 Branch `assert-tui-config-wiring` merged into local `main` with `--no-ff` and deleted; the
 worktree is removed. Not pushed.
+
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** Stays on local `main`; not pushed.
+
+**All 7 DoD items met**, plus 1b. DoD 6 required no work — `tmux-regression-guard-ci-proof`
+had already removed the stale "Bubble Tea needs a TTY" comment, confirmed by
+`grep -rn "needs a TTY" internal/` being empty. Test-only: one new file,
+`internal/cli/wiring_test.go`, and no production file changed.
+
+**Independently reproduced by the curator — the two mutations that carry the task.**
+
+- **Mutation 10 (DoD 1b).** Added a `Throwaway string` field to `tui.Config`; the guard failed
+  with `tui.Config.Throwaway (string) has no entry in wiringChecks: nothing asserts what
+  runTUI puts in it. Add an assertion, or nilIsCorrect with the reason.` This is the item the
+  plan singled out as the one real risk: a reflect walk over the *map* instead of the *struct*
+  proves nothing and is indistinguishable from the correct version when green. It walks the
+  struct. The failure message also tells the next person what to do, which is what makes the
+  guard a forcing function rather than an obstacle.
+- **Mutation 7 (DoD 2).** Replaced `SetSticky` with `func(k task.ScopeKind) error
+  { return nil }`; failed with `after SetSticky("global") the state dir reads back "dir" — the
+  write did not land`. This is the bug shape the task exists for. A non-nil check passes here;
+  only the round trip through the state dir discriminates.
+
+Both messages matched the Evidence verbatim, and `git status` was clean after each restore.
+
+**Why this task was worth running at all.** It closes a gap that had already shipped twice in
+this repo in a different form — `scope.Resolve()` was `Resolver{}.Resolve()` while 28 tests
+passed, because every one injected `TmuxEnv` by hand. `internal/tui` is exhaustively tested
+against an *injected* `Config`; nothing tested the code that *builds* the real one, so
+`DefaultScope` and `SetSticky` had been wired but unexercised since
+`task-create-edit-rescope`. The reflect guard converts that from a thing someone has to
+remember into a test failure at the moment a field is added.
+
+**The `nilIsCorrect` helper is the detail worth keeping.** Entering `Now` in the table as
+`nilIsCorrect("the popup defaults it to time.Now")` rather than omitting it means "this field
+is deliberately unset" is a recorded decision with a reason in the source — which is the
+entire point of forcing every field to appear, and mutation 9 (wiring `Now: time.Now`) proves
+even that entry has teeth.
+
+**CLAUDE.md:** no addition needed. The pitfall this task instantiates — "a test that injects a
+dependency cannot prove the production default is wired" — has been in CLAUDE.md since
+`scope-resolution`, and this is that lesson applied rather than a new one. The mechanism is
+documented in `wiring_test.go`'s own comments.
+
+**Worktree:** removed by the executor before this checkpoint.
