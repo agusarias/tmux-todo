@@ -61,6 +61,12 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - **Absent beats empty.** Outside tmux there is no session scope rather than a
   `""` key, and `--session` errors; the sticky default stores a *kind*, never a
   key, in the XDG *state* dir, and a corrupt file falls back silently.
+- **`tdo list --json` is a published contract**, not a debug dump: an object
+  wrapper (an array can never gain a sibling field), RFC3339 **UTC** timestamps,
+  nested `scope`, `done_at` null rather than omitted, `{"tasks":[]}` never `null`,
+  and HTML escaping off so task prose survives as itself. `internal/cli/json.go`
+  is that contract alone, pinned bytewise by `testdata/list.json`. Cosmetic churn
+  there is a breaking change for anyone's script.
 - **Version** is stamped via `-ldflags -X .../internal/cli.Version`.
 
 ## Pitfalls
@@ -156,6 +162,22 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - **Resolution costs one `tmux display-message`** (~5ms of a ~5.7ms cold median),
   one call for both formats. If the popup ever needs those milliseconds back, the
   lever is tmux expanding `#{...}` straight into the `display-popup` command.
+- **stdlib `flag` stops at the first positional, and reordering around it needs
+  the FlagSet itself.** `tdo add "text" --global` drops `--global` into
+  `fs.Args()`, so it is silently ignored — a task filed to the wrong scope at exit
+  0. `cli.parseArgs` hoists flag tokens ahead of positionals, but the hoist must
+  ask the FlagSet whether each flag consumes the next token (`--db path`) or not
+  (`--global`); a naive "move positionals to the end" reorder makes
+  `add "text" --db path` feed the task text to `--db`. Consequence: dash-leading
+  task text needs an explicit `--`. That is deliberate — absorbing dash tokens as
+  text would file `tdo add x -sesion` as a task named "-sesion" and exit 0, which
+  is the same silent-wrong-scope failure the hoist exists to prevent.
+- **A golden file typed by hand beats one captured from output.**
+  `internal/cli/testdata/list.json` was written from the brief's literal before
+  the encoder existed and matched byte-for-byte on the first run, which is what
+  makes it evidence that the *contract* is implemented. A golden captured from
+  `tdo list --json` would have pinned any bug just as firmly and passed just as
+  green — it proves only that the code agrees with itself.
 
 ## Worktrees
 

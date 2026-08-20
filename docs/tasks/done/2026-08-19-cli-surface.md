@@ -1,6 +1,6 @@
 # CLI Surface
 
-**Status:** review
+**Status:** done
 **Worktree:** none (removed after merge)
 
 ## Goal
@@ -492,3 +492,49 @@ Two pitfalls this task uncovered that the next session would otherwise re-derive
   evidence that the *contract* is implemented rather than evidence that the code is
   self-consistent. Capturing the golden from `tdo list --json` would have pinned any bug just
   as firmly.
+
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `3bd351d` stays on local `main`; no revert, no fix-forward.
+`main` is **unpushed** — pushing remains the user's call.
+
+**Definition of done: 11 of 12 met, 1 struck.** The executor's item-by-item table above is
+accurate as written; DoD 9 was struck by the 2026-08-20 scope event, and `grep -rn PurgeDone
+internal/cli/` returning nothing is the right evidence for a *negative* requirement.
+
+**Independently re-verified by the curator on current `main`** (not merely read from the
+Evidence section): `go test ./...` green across all five packages, `go vet ./...` silent,
+`gofmt -l .` empty.
+
+**The one guard worth naming.** `TestAddRealSeamSeesTmux` is the non-vacuous leg. CLAUDE.md's
+standing pitfall is that `NewResolver().TmuxEnv == os.Getenv("TMUX")` is `"" == ""` on a
+tmux-less runner, so it passes against the very bug it was written for. This test sets
+`t.Setenv("TMUX", "/tmp/definitely-not-a-real-tmux-socket,1,0")` first, so the assertion has
+something to be wrong about — the socket is fake and the query still fails, but the failure
+now has to come from tmux rather than from the resolver never having looked. That closes the
+loop on the bug that got `scope-resolution` rejected, at the first new caller.
+
+**Why the golden file is the strongest artifact here.** `testdata/list.json` was typed from
+DoD 5's literal and matched on the first run. That ordering is what makes it evidence about
+the *contract* rather than evidence that the encoder agrees with itself — a golden captured
+from `tdo list --json` would have been just as green and pinned any bug just as firmly. The
+`TZ=Asia/Tokyo` leg plus setting `time.Local` inside the test (an env var can arrive after the
+time package resolved the zone) is what makes the `.UTC()` in `rfc3339` actually able to fail.
+
+**CLAUDE.md updated** with three entries: the published-JSON-contract decision, the stdlib
+`flag` positional/reorder trap (including why dash-leading text needs `--`), and the
+hand-written-vs-captured golden lesson. Per repo convention no per-package detail was added —
+that lives in the doc comments in `json.go` and on `env.filter`.
+
+**Accepted, deliberate properties** (not defects, recorded so they are not "fixed" later):
+plain `list` output re-tightens its columns between runs because they are sized from the rows
+present — the human format is explicitly not a compatibility promise, unlike `--json`; and
+`env.addScope` only ever *reads* the sticky default, so a shell alias or cron running
+`tdo add --global` cannot silently change what the next popup add defaults to. Only the TUI's
+Enter writes it.
+
+**Downstream notes.** `store.PurgeDone` remains an uncalled primitive, by design — retention
+policy is `completed-task-lifecycle`'s, already `done`. The `--json` shape is now frozen for
+`all-tasks-view-with-sesh-jump` and any statusline work to build on.
+
+**Worktree:** removed by the executor before this checkpoint.
