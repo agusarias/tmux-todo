@@ -278,7 +278,7 @@ or the Definition of done.
 
 ## Evidence
 
-**Merge commit:** `MERGE_HASH_PLACEHOLDER` (branch `cli-surface`, merged into local `main`,
+**Merge commit:** `3bd351d` (branch `cli-surface`, merged into local `main`,
 not pushed).
 
 ### `go test ./internal/cli/ -v` — 33 tests, 42 including subtests, all pass
