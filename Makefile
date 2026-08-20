@@ -5,7 +5,7 @@ LDFLAGS := -s -w -X $(PKG)/internal/cli.Version=$(VERSION)
 
 export CGO_ENABLED := 0
 
-.PHONY: all build test vet fmt fmt-check lint install clean
+.PHONY: all build test test-plugin vet fmt fmt-check lint install clean
 
 all: build
 
@@ -14,6 +14,12 @@ build:
 
 test:
 	go test ./...
+
+# The TPM plugin's shell harness. Separate from `test` on purpose: `test` is
+# `go test ./...` and must stay runnable without a tmux server (CLAUDE.md).
+# Skips with a message, rather than failing, when tmux is absent.
+test-plugin:
+	bash test/plugin_install_test.sh
 
 vet:
 	go vet ./...
