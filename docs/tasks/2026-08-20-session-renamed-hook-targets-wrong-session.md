@@ -1,7 +1,7 @@
 # The session-renamed Hook Resolves The Wrong Session
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-session-renamed-hook
 
 ## Goal
 `tdo session-renamed`, **when run as a `run-shell` hook child**, must act on the session the
