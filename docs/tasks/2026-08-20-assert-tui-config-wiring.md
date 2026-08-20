@@ -1,6 +1,6 @@
 # Assert What `tui.Config` Is Actually Wired With
 
-**Status:** agreed
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -93,7 +93,8 @@ to find out whether that belief is warranted.
   brief triaged as a two-line test change from quietly becoming something else.
 
 ## Plan
-*Awaiting Checkpoint 1.* `internal/cli` only, test-only except that `TestTUIWiringSmoke`'s
+**Approved at Checkpoint 1 on 2026-08-20** as written. `internal/cli` only, test-only except
+that `TestTUIWiringSmoke`'s
 stale doc comment goes. The plan is disposable; Goal, Constraints and Definition of done are
 not — changing those is a scope event, so set `blocked` instead.
 
