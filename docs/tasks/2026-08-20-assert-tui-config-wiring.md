@@ -1,6 +1,6 @@
 # Assert What `tui.Config` Is Actually Wired With
 
-**Status:** draft
+**Status:** ready
 **Worktree:** none
 
 ## Goal
@@ -23,12 +23,14 @@ against an *injected* `Config`; the thing nobody tests is the code that *builds*
 one. `SetSticky` in particular has exactly one production construction site and no assertion
 on it.
 
-OPEN: does this also want a guard on the reverse direction — that a field *added* to
-`tui.Config` in future fails the test until `runTUI` populates it? A `reflect`-based
-"every exported field is non-zero" check would do it and would have caught this class at the
-moment `DefaultScope` was introduced, but it fights fields whose zero value is legitimate
-(`Now` nil means `time.Now`, and `SetSticky` nil is documented as "do not remember"). Worth
-a ruling at grill time.
+**RESOLVED 2026-08-20 (grill).** Yes — and by requiring every field to be *checked*, not
+merely non-zero. The test holds a `map[string]func(...)` of field name to assertion and walks
+`tui.Config`'s exported fields with `reflect`, failing on any field the map does not mention.
+A field added to `Config` then breaks this test until someone either asserts it or records why
+it needs none. The weaker "every field non-zero, with an allow-list" was rejected: a
+`SetSticky` stub that does nothing is non-nil and would pass, which is the bug shape this task
+exists to catch. `Now` is the one legitimately-nil field (documented as defaulting to
+`time.Now`) and is entered in the map as such, with its reason.
 
 ## Constraints
 - `internal/cli` only. `internal/tui`, `internal/scope` and `internal/store` do not change.
@@ -50,8 +52,13 @@ to find out whether that belief is warranted.
 1. The wiring test captures the `tui.Config` passed through the `runTUIProgram` seam and
    asserts every field against the resolved environment the test set up: `DB` is the opened
    store at the `--db` path, `Scopes` equals `Resolved.Active()` in tier order, `Home` is the
-   home dir, `Version` is `cli.Version`, and `Now` is either non-nil or documented as
-   deliberately nil.
+   home dir, `Version` is `cli.Version`, `LiveSessions` is what the resolver reported, and
+   `Now` is recorded as legitimately nil with its reason.
+1b. **The test fails when `tui.Config` gains a field it does not check.** A
+   `map[string]func(...)` of field name to assertion, cross-checked against a `reflect` walk
+   of `Config`'s exported fields, with a failure message naming the unchecked field. Proven by
+   adding a throwaway field to `Config` and recording the failure — that run *is* the evidence
+   for this item, since the guard is otherwise indistinguishable from an ordinary test.
 2. **`SetSticky` is asserted to be non-nil *and to work***: calling it persists the kind, and
    a subsequent `scope.Resolver.StickyDefault` (with `StateDir` pointed at a temp dir) reads
    it back. A non-nil check alone would pass against a `func(task.ScopeKind) error { return
@@ -86,7 +93,77 @@ to find out whether that belief is warranted.
   brief triaged as a two-line test change from quietly becoming something else.
 
 ## Plan
-(Added at Checkpoint 1.)
+**Approved at Checkpoint 1 on 2026-08-20.** `internal/cli` only, test-only except that
+`TestTUIWiringSmoke`'s stale doc comment goes. The plan is disposable; Goal, Constraints and
+Definition of done are not — changing those is a scope event, so set `blocked` instead.
+
+**Approach.** `runTUIProgram` already gives the test the `tui.Config` for free — the seam
+landed with `tmux-regression-guard-ci-proof` (merge `260d8bc`), so the Constraint that would
+have blocked this task is satisfied. The test substitutes the seam, captures the Config, and
+returns without starting a program.
+
+The structure is a field-name-to-assertion table checked against a `reflect` walk:
+
+```go
+// Every exported field of tui.Config must appear here. The reflect walk below
+// fails on any that does not, so adding a field to Config breaks this test
+// until someone either asserts it or records why it needs no assertion.
+checks := map[string]func(*testing.T, tui.Config, fixture){
+    "DB":           func(t *testing.T, c tui.Config, f fixture) { /* c.DB.Path() == f.dbPath */ },
+    "Scopes":       ...,  // equals f.resolved.Active(), in tier order
+    "Home":         ...,
+    "Version":      ...,
+    "DefaultScope": ...,  // the sticky default, and the unavailable-fallback case
+    "SetSticky":    ...,  // non-nil AND round-trips through the state dir
+    "LiveSessions": ...,
+    "Now":          nilIsCorrect("the popup defaults it to time.Now"),
+}
+```
+
+`nilIsCorrect` being a named helper rather than a skipped entry matters: it makes "this field
+is deliberately unset" a recorded decision with a reason in the source, which is the whole
+point of forcing every field to appear.
+
+**The two assertions with teeth**, per DoD 2 and 3:
+
+- **`SetSticky` must round-trip, not merely be non-nil.** Call it, then read the value back
+  through a `scope.Resolver` with `StateDir` pointed at a `t.TempDir()`. A non-nil check
+  passes against `func(task.ScopeKind) error { return nil }`, which is exactly the bug shape.
+- **`DefaultScope` needs the degradation case too.** Seed the state dir with a preference
+  naming a scope the fixture makes unavailable, and assert the result falls back to the first
+  entry in `Scopes` rather than seeding a scope the user cannot submit to.
+
+**Files.** `internal/cli/cli_test.go` (or a new `wiring_test.go` if the table makes the
+existing file unwieldy — executor's call), plus deleting the stale doc comment on
+`TestTUIWiringSmoke` if `tmux-regression-guard` did not already.
+
+**Sequencing.**
+1. **The reflect guard first, against the current 8 fields.** Land it and prove it fails by
+   adding a throwaway field to `Config` — DoD 1b's evidence. Doing this first means every
+   assertion added afterwards is one the guard already demanded.
+2. `DB`, `Scopes`, `Home`, `Version`, `LiveSessions` — the straightforward five.
+3. `SetSticky`'s round trip.
+4. `DefaultScope`, both the normal and the unavailable-fallback case.
+5. The outside-tmux leg (DoD 5): no session scope in `Scopes`, and `DefaultScope` does not
+   name one.
+6. The per-field mutation table (DoD 4), then the sweep including the in-tmux run.
+
+**What could go wrong.**
+- *The reflect walk passing vacuously.* If it iterates the map instead of the struct, it
+  proves nothing — every entry trivially matches itself. It must walk
+  `reflect.TypeOf(tui.Config{})` and look each field up in the map, not the reverse. The
+  throwaway-field proof is what distinguishes these two implementations, which is why it is a
+  DoD item rather than a nicety.
+- *Touching the user's real state dir.* `SetSticky`'s round trip writes for real. `StateDir`
+  and `$XDG_STATE_HOME` must both point at temp dirs — `internal/scope/sticky.go` falls
+  through to the real one otherwise, and this task's whole subject is a *write* path.
+- *Comparing `SetSticky` by value.* Func values are not comparable in Go beyond nil; the
+  assertion has to be behavioural. Anything reaching for `==` on a func will not compile,
+  which is a helpful failure rather than a silent one.
+- *`DB` comparison.* Asserting pointer identity against the `store.DB` the test opened is
+  wrong — `runTUI` opens its own. Compare `DB.Path()`, and assert it is usable.
+- *Re-introducing the hang.* Any path that reaches the real `tui.Run` puts this task's parent
+  bug straight back. The in-tmux sweep leg (DoD 7) is the check that it has not.
 
 ## Evidence
 (Added by the executor.)
