@@ -1,7 +1,7 @@
 # Assert What `tui.Config` Is Actually Wired With
 
-**Status:** in-progress
-**Worktree:** ../todo-assert-tui-config-wiring
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 `internal/cli`'s TUI wiring test must assert the **contents** of the `tui.Config` it builds,
@@ -272,4 +272,6 @@ It completed rather than hanging. `store` and `task` came from the cache; `inter
 `make test-plugin` was not run: it drives the TPM shell harness and this change is test-only
 Go in `internal/cli`, which that harness does not touch.
 
-**Merge commit:** (recorded below after the merge.)
+**Merge commit:** `23c91ac` — `git show 23c91ac` / `git log -1 -p 23c91ac` for the diff.
+Branch `assert-tui-config-wiring` merged into local `main` with `--no-ff` and deleted; the
+worktree is removed. Not pushed.
