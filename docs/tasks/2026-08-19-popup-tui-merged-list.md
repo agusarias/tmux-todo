@@ -1,7 +1,7 @@
 # Popup TUI Merged List
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** /Users/agusarias/workspace/todo-popup-tui-merged-list
 
 ## Goal
 The default popup view: session, dir and global tasks merged into one list with a per-row
