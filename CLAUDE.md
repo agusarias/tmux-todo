@@ -294,6 +294,18 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `var runTUIProgram = tui.Run` so a test can substitute it. Any future package that starts a
   terminal program from a test needs the same seam; and note the guard has to fail *outside*
   tmux too (it asserts the substituted program ran), because a hang is invisible to CI.
+- **`tmux list-keys -T <table> <key>` prints NOTHING and exits 0** on 3.7b — for a key
+  that *is* bound. The `-T` filter and a key argument do not combine; `list-keys <key>`
+  with no `-T` works but spans every table. So a check built on the combined form answers
+  "not bound" for a binding sitting right there — the wrong direction to be wrong in, since
+  an assertion of zero passes. `test/plugin_install_test.sh` awks over the whole table
+  instead (`$4 == key`), which is also what keeps it counting the *plugin's* bindings rather
+  than tmux's own defaults.
+- **`=` is a *session* target prefix, and `send-keys`/`capture-pane` reject it.**
+  `capture-pane -t '=work'` answers `can't find pane: =work` on 3.7b even when the session
+  exists, so `target()`'s `=` must not be pasted into pane-targeting commands. And in **zsh**
+  a bare `=work` is command-path expansion (`=word` → `$(which word)`), which fails with
+  `word not found` before tmux ever sees it — quote every `=` target in a zsh shell.
 - **tmux target names need `=` to match exactly** — `switch-client -t dev` will happily land
   on `dev-2`, since tmux falls back to prefix and then fnmatch matching. `internal/cli`'s
   `target()` prepends it. **But do not apply it to `new-session -s`**: that argument is a name

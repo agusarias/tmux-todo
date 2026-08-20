@@ -124,13 +124,42 @@ resolve_binary() {
 #
 # bind-key REPLACES the binding for a key, so re-running this is idempotent by
 # construction. Only set-hook -ga accumulates, which is why the guard lives
-# there and only there.
+# there and only there. What re-running does NOT do is retract a binding made
+# under an earlier @todo-key / @todo-key-table: bind-key is keyed on (table,
+# key), so changing either leaves the old binding until the server restarts.
+# Unbinding the previous pair would mean remembering it, and a plugin that
+# unbinds keys it no longer owns is a plugin that eats a user's own rebinding.
+
+# Key and table are read from options, so `set -g @todo-key` must come BEFORE
+# this script runs in the user's config (TPM's plugin lines are near the end of
+# a tmux.conf, so this is the normal order anyway).
 install_keybind() {
-    local key
+    local key table
     key=$(tmux show-option -gqv @todo-key 2>/dev/null || true)
     [ -n "$key" ] || key='t'
 
-    tmux bind-key -T prefix "$key" "if-shell -F '#{m:-*,#{e|-|:#{client_width},100}}' {
+    # The table is configurable too, because whether a popup deserves the prefix
+    # is a matter of how the user has already spent their keyspace: a config that
+    # root-binds C-t/C-p/C-w wants @todo-key-table 'root' and no prefix at all.
+    # Two reads, not one combined `show-option -gqv a \; show-option -gqv b`:
+    # an unset option prints NOTHING, not an empty line, so a combined read
+    # cannot be split back into two values (CLAUDE.md).
+    #
+    # Only prefix and root are accepted. tmux takes any name here, but a custom
+    # table is reachable only via a `switch-client -T` binding the user owns, so
+    # honouring one would install a key nothing can press. A typo falls back to
+    # prefix WITH a warning rather than binding nothing: the key still works, and
+    # the message says why it is not where it was asked for.
+    table=$(tmux show-option -gqv @todo-key-table 2>/dev/null || true)
+    case $table in
+        prefix|root) ;;
+        '') table='prefix' ;;
+        *)  warn "@todo-key-table is '$table'; only 'prefix' and 'root' are supported. Binding '$key' in prefix instead."
+            table='prefix'
+            ;;
+    esac
+
+    tmux bind-key -T "$table" "$key" "if-shell -F '#{m:-*,#{e|-|:#{client_width},100}}' {
   if-shell -F '#{m:-*,#{e|-|:#{client_height},25}}' {
     display-popup -E -w 60 -h 15 '$TDO_BIN tui'
   } {

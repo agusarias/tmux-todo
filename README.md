@@ -25,10 +25,14 @@ one, all without reopening it.
 
 ```tmux
 set -g @plugin 'agusarias/tmux-todo'
-set -g @todo-key 't'   # optional; 't' is the default
+set -g @todo-key 't'          # optional; 't' is the default
+set -g @todo-key-table 'root' # optional; 'prefix' is the default
 ```
 
 Then `prefix + I` to install, and `prefix + t` opens the popup.
+
+Both options are read when the plugin runs, so they have to be set **before**
+its `@plugin` line — the usual order in a `tmux.conf` anyway.
 
 The plugin needs a `tdo` binary and finds one in this order, stopping at the
 first success:
@@ -59,6 +63,8 @@ make build && cp bin/tdo ~/.local/bin/   # anywhere on your $PATH
 ```
 
 ```tmux
+set -g @todo-key 't'            # optional, and must precede the run-shell
+set -g @todo-key-table 'prefix' # optional, likewise
 run-shell '/path/to/tmux-todo/tmux-todo.tmux'
 ```
 
@@ -71,9 +77,17 @@ substitute your own path.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `@todo-key` | `t` | The key, in the **prefix** table, that opens the popup |
+| `@todo-key` | `t` | The key that opens the popup |
+| `@todo-key-table` | `prefix` | Which key table that key lives in: `prefix`, or `root` for no prefix at all |
 
-That is the only option. The popup's size is fixed on purpose (≈60% × 60%, never
+`root` is for a config that has already spent its `C-<key>` space on tmux rather
+than on readline — `set -g @todo-key 'C-l'` with `@todo-key-table 'root'` opens
+the popup on a bare Ctrl-l, at the cost of that pane's clear-screen. Only those
+two table names are accepted; anything else falls back to `prefix` with a message,
+since a custom table is reachable only through a `switch-client -T` binding you
+own.
+
+Those are the only options. The popup's size is fixed on purpose (≈60% × 60%, never
 smaller than 60 × 15): below that floor the popup's own footer starts truncating,
 so a user-settable size would silently break the frame.
 

@@ -159,12 +159,18 @@ tm() { "$REAL_TMUX" -L "$SOCK" "$@"; }
 # `bind-key -T prefix <key> <command>`, so field 4 is the key; the plugin's
 # command is the only one that opens a popup. Counting bare bindings for the key
 # would count tmux's default clock-mode binding and pass with the plugin gone.
+# The optional second argument is the key table, defaulting to prefix so the
+# resolution cases read as before; the root-table cases pass it explicitly.
+# `list-keys -T <table> <key>` would be shorter than awk over the whole table,
+# but on tmux 3.7b combining -T with a key argument prints NOTHING and exits 0 —
+# for a key that IS bound. An assertion of 0 built on it passes while the binding
+# sits right there, which is the wrong direction to be wrong in.
 plugin_keybinds_for() {
-    tm list-keys -T prefix 2>/dev/null | awk -v k="$1" '$4 == k' | grep 'display-popup'
+    tm list-keys -T "${2:-prefix}" 2>/dev/null | awk -v k="$1" '$4 == k' | grep 'display-popup'
 }
-count_plugin_keybinds_for() { plugin_keybinds_for "$1" | grep -c . ; }
+count_plugin_keybinds_for() { plugin_keybinds_for "$1" "${2:-prefix}" | grep -c . ; }
 count_all_keybinds_for() {
-    tm list-keys -T prefix 2>/dev/null | awk -v k="$1" '$4 == k' | grep -c .
+    tm list-keys -T "${2:-prefix}" 2>/dev/null | awk -v k="$1" '$4 == k' | grep -c .
 }
 
 # tdo hooks, counted by BODY not name: after `set-hook -gu session-renamed`,
@@ -312,6 +318,43 @@ out=$(plugin_run)
 assert_eq 1 "$(count_plugin_keybinds_for w)" "binds w when @todo-key is w"
 assert_eq 0 "$(count_plugin_keybinds_for t)" "and installs no popup binding on t"
 assert_contains "$(plugin_keybinds_for w)" "display-popup" "the override still opens the popup"
+case_end
+
+# ======================================================= @todo-key-table
+
+# The default table has to be asserted in the NEGATIVE too: `$4 == k` over
+# list-keys -T root matches nothing when the table is empty, so "1 in prefix"
+# alone would also pass for a plugin that bound both tables.
+case_start table-default
+stub "$PATHDIR/tdo"
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for t prefix)" "binds in prefix when @todo-key-table is unset"
+assert_eq 0 "$(count_plugin_keybinds_for t root)" "and nothing in root"
+case_end
+
+# The case this option exists for: a config that has already spent its C-<key>
+# space on tmux wants the popup with no prefix at all.
+case_start table-root
+stub "$PATHDIR/tdo"
+tm set-option -g @todo-key-table root >/dev/null 2>&1
+tm set-option -g @todo-key C-l >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for C-l root)" "binds C-l in root when @todo-key-table is root"
+assert_eq 0 "$(count_plugin_keybinds_for C-l prefix)" "and NOT in prefix"
+assert_eq 0 "$(count_plugin_keybinds_for t prefix)" "and leaves prefix t alone"
+assert_eq 1 "$(count_all_keybinds_for C-l root)" "exactly one binding on root C-l, so a second is still caught"
+assert_contains "$(plugin_keybinds_for C-l root)" "display-popup" "the root binding still opens the popup"
+case_end
+
+# A typo must not cost the user their keybind: fall back to prefix and say so.
+# `tmux bind-key -T <nonsense>` would otherwise create a table nothing can reach.
+case_start table-invalid
+stub "$PATHDIR/tdo"
+tm set-option -g @todo-key-table prefx >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for t prefix)" "falls back to prefix on an unsupported table"
+assert_eq 0 "$(count_plugin_keybinds_for t prefx)" "and creates no binding in the bogus table"
+assert_contains "$out" "@todo-key-table" "the diagnostic names the option"
 case_end
 
 # ============================================================= idempotence

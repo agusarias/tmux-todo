@@ -227,10 +227,16 @@ TPM plugin wrapping the Go binary:
 ```tmux
 set -g @plugin 'agusarias/tmux-todo'
 set -g @todo-key 't'
+set -g @todo-key-table 'prefix'
 ```
 
-`tmux-todo.tmux` installs the popup keybind (the `if-shell` size branch above, in the
-**prefix** table, under `@todo-key` or `t`) and appends the `session-renamed` hook. Those two
+`tmux-todo.tmux` installs the popup keybind (the `if-shell` size branch above, under
+`@todo-key` or `t`, in the `@todo-key-table` table or `prefix`) and appends the
+`session-renamed` hook. The table is an option rather than a fixed `prefix` because
+which keys are worth spending is the user's call and not the plugin's: `root` binds with
+no prefix. Only `prefix` and `root` are honoured — tmux accepts any table name, but a
+custom one is reachable only via a `switch-client -T` binding the user owns, so
+honouring one would install a key nothing can press. Those two
 commands are recorded verbatim in
 `docs/tasks/done/2026-08-19-tmux-integration-and-rename-hook.md`.
 
