@@ -172,4 +172,83 @@ asset for an open-source plugin, not a liability.
   until the workflows exist on `main`.
 
 ## Evidence
-(Added by the executor.)
+
+### Steps 1-3 complete: pushed, and CI is green (DoD 1, 2, 3)
+
+**Step 1 — pushed.** `bf9fed1..0335701`, 57 commits, 52 files, +13323/-322. The repo was
+already public at `bf9fed1`, so this published the backlog rather than the project.
+
+**CI's first run ever failed, twice, and both failures were this repo's own anti-vacuity
+guards refusing to run tests that would have proved nothing.** Neither was a defect:
+
+| run | job | what happened |
+|---|---|---|
+| `32409675065` | `go (ubuntu-latest)` | `tmux is on this runner at /usr/bin/tmux` — the assertion fired |
+| `32409675065` | `plugin harness` | `/usr/bin/go exists, so the sandbox cannot control whether go resolves. Aborting.` |
+
+`go (macos-latest)` and all four cross-compiles passed on that first run.
+
+**This satisfies DoD 2 with a real experiment rather than a contrived one.** The item asked for
+a deliberate run with tmux installed in the `go` job, showing that job fail. Run `32409675065`
+*is* that run — `actions/runner-images`' README does not list tmux, so the image supplied the
+condition unprompted and the assertion caught it. An assertion nobody has watched fail is an
+assertion nobody has tested; this one has now been watched failing, on the real runner, for
+the real reason.
+
+**Fix 1 — mask, never delete** (`22ccf0d`). Both failing steps' own comments prescribed
+masking. The `go` job now masks tmux (bounded loop, re-checks, errors if it cannot) and the
+`plugin` job masks `tdo`/`go` out of `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` — then *proves
+setup-go's toolchain still resolves*, because the go-build resolution case needs a usable `go`
+on the normal PATH at the same time as no `go` in the system dirs. Result: `go (ubuntu-latest)`
+green, and the harness got past its abort into the tests themselves.
+
+**Fix 2 — a version-dependent assertion mechanism** (`26c8ab8`). Run `32410008830` left the
+harness at **118 passed, 3 failed**, all three reading `tmux show-messages` to prove the
+`display-message` channel fired. tmux **3.4** (ubuntu's apt tmux) cannot answer that on a
+client-less server; **3.7b** (the dev machine) can. The plugin was never at fault — `warn()`
+writes to stderr *and* `display-message`, and the stderr half was already asserted beside each
+of the three and already passing on Linux. So the harness now detects the capability at
+startup, reports it in the header beside `wget` and `python3`, and skips loudly where the
+question is unanswerable. **Both branches were exercised before pushing** — observable → 118/0
+unchanged, probe forced off → 115/0 with both SKIP notices — so the skip path is not untested
+code.
+
+**Run `32410474435`: all seven jobs green.**
+
+```
+✓ go (ubuntu-latest)          ✓ cross-compile (darwin, arm64)
+✓ go (macos-latest)           ✓ cross-compile (darwin, amd64)
+✓ plugin harness              ✓ cross-compile (linux, amd64)
+                              ✓ cross-compile (linux, arm64)
+```
+
+### What CI bought immediately
+
+The runner's own header, which is the portability audit above turning out to be right:
+
+```
+tmux          : /usr/bin/tmux (tmux 3.4)
+bash          : /usr/bin/bash (GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu))
+host asset    : tdo-linux-amd64
+downloader    : curl=/usr/bin/curl wget=/usr/bin/wget
+show-messages : NOT observable on this tmux; message-log assertions skip
+```
+
+- **The suite has now run with no tmux at all**, on `go (ubuntu-latest)`. That is the
+  environment `tmux-regression-guard-ci-proof` was written for and had never actually met:
+  every scope, wiring and TUI guard in this repo had only ever run on a developer's machine
+  inside tmux.
+- **`dl-9-wget-only` executed and passed** — `ok wget alone is enough to download`. That branch
+  of `fetch()` had never run: `release-binaries-and-ci` recorded it as a genuine untested gap
+  because this machine has no `wget`. First CI run, gap closed.
+- **The harness ran on GNU userland and bash 5** for the first time, against BSD/bash-3.2
+  provenance, and needed no portability fix at all — the sha256 tool resolution and the
+  `uname`-computed host asset both held.
+
+### Remaining: steps 4-8
+
+Not started. The release workflow has still never run, no tag exists, and install-by-download
+has only been proven against a local fixture. **Open judgment call for step 6**, flagged in the
+Plan and now due: `session-renamed-hook-targets-wrong-session` is `in-progress` and unfixed, so
+cutting `v0.1.0` today would ship a release whose rename-following silently does nothing.
+
