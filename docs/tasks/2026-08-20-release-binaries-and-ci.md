@@ -1,6 +1,6 @@
 # Release Binaries And CI
 
-**Status:** in-progress
+**Status:** review
 **Worktree:** ../todo-release-binaries-and-ci
 
 ## Goal
@@ -538,6 +538,9 @@ task's to close.
 | 15 | ✅ | README: the five-step chain, the three verification outcomes, and a manual release-asset install whose `shasum -c` one-liner was run (and shown to fail on a corrupted file) |
 | 16 | ✅ | `docs/design.md` Distribution: five-step chain, the asset contract, the verification asymmetry, CI, and why `v0.1.0` |
 | 17 | ✅ | see Sweep |
+
+**Merge commit:** `61f6704` on local `main`, **unpushed** — `git log -1 -p 61f6704` (or
+`git show bbfe71d` for the change itself; the worktree is gone). 8 files, +1376/-28.
 
 **What a reviewer should read closely.** `tmux-todo.tmux` is the only file here that runs on
 a user's machine and executes something it fetched from the network: `download_binary`,
