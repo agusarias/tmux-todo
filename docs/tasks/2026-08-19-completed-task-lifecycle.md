@@ -1,7 +1,7 @@
 # Completed Task Lifecycle
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** /Users/agusarias/workspace/todo-completed-task-lifecycle
 
 ## Goal
 `space` toggles completion on the cursor row. A row completed during this popup session
