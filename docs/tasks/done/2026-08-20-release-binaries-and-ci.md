@@ -1,6 +1,6 @@
 # Release Binaries And CI
 
-**Status:** review
+**Status:** done
 **Worktree:** ../todo-release-binaries-and-ci
 
 ## Goal
@@ -548,3 +548,68 @@ a user's machine and executes something it fetched from the network: `download_b
 untested-in-anger by construction and are the follow-up task's subject. `README.md`,
 `docs/design.md` and `CLAUDE.md` are prose. `test/plugin_install_test.sh` is the largest
 diff and the evidence above is what carries it.
+
+## Close-out — 2026-08-20 (curator, Checkpoint 2 approved)
+
+**Approved as merged.** `61f6704` stays on local `main`; still unpushed.
+
+**13 of 17 DoD items fully met; 3 partial and 1 not claimed, every one marked honestly by the
+executor rather than rounded up.** That is the reason this checkpoint was short: the brief's
+own table already said what had and had not been proven, so the audit was verification rather
+than excavation. DoD 6, 10 and 14's remainders are carried by
+`2026-08-20-prove-ci-and-cut-v0.1.0.md` and are not lost.
+
+**Independently reproduced by the curator:** `make test-plugin` → **118 passed, 0 failed**
+(55 before this task, so 63 new assertions), and the security-critical mutation — deleting
+`[ "$want" = "$got" ] || return 1` — → **114 passed, 4 failed**, all four in
+`dl-2-checksum-mismatch`, with the messages confirming that a mismatching download would be
+installed *and* that a keybind and hook would point at it. The guard is load-bearing.
+
+**The user's best-effort checksum ruling is implemented exactly as the curator read it back at
+Checkpoint 1**, as a tri-state whose boundary is written into `verify_download`'s own comment:
+`0` sum matches → use; `1` sum **disagrees → delete and fall through**; `2` no usable answer
+(no `checksums.txt`, no sha256 tool, no line for this asset) → proceed unverified **and warn**.
+`dl-2` against `dl-4`/`dl-5` pins both sides. The ruling relaxed what happens when verification
+is *unavailable*, never what happens when it says no, and the code says so where the next
+reader will find it.
+
+**The best mutation in this task was not one the brief asked for.** Dropping `curl`'s `-f`
+(`curl -fsSL` → `curl -sSL`) causes the **404 page** to be installed as `bin/tdo` with a key
+bound to it — 116 passed, 2 failed. That is also why the fixture is served over real local
+HTTP rather than `file://`: only a genuine 404 can show `-f` is load-bearing. Finding a guard
+the brief did not specify is the executor doing the job the brief exists to enable, not
+scope creep.
+
+**Two things done right that are worth naming.** `actionlint` was not installed, so it was
+built from source rather than skipped — and then shown non-vacuous by feeding it a misspelled
+`matrix.oss` and a `setup-go` missing its ref. And DoD 2's assertion (fail the `go` job if
+tmux is present) was checked against both runner images' READMEs *before* being relied on,
+because an assertion that fires on arrival would have turned CI red on its first run and
+looked like the workflow's fault.
+
+**Two minor curator findings, neither a code defect, neither worth a fix-forward.**
+
+1. **The end-to-end transcript is stale by one line.** It shows the downloaded binary as
+   `-rwx--x--x` (0711), which is what `chmod +x` yields on `mktemp`'s 0600 — the behaviour the
+   shipped code deliberately replaced. The code now does `chmod 0755` and its comment explains
+   why (a binary whose permissions depend on which resolution step installed it is a
+   difference waiting to be debugged). Verified both halves directly: `+x` on 0600 gives
+   `-rwx--x--x`, `0755` gives `-rwxr-xr-x`. So the code is right and that transcript predates
+   the fix.
+2. **Nothing asserts the installed mode**, so a revert to `chmod +x` would fail no test. Small
+   in consequence — 0711 only stops *other* users reading a binary in a per-user plugin dir —
+   but this project has been consistent that a fix gets a guard, and this one has not. Not
+   spun out into its own brief at the user's Checkpoint 2 direction; recorded here so the gap
+   is known rather than forgotten.
+
+**Accepted gaps, restated so they are not mistaken for oversights.** The `wget` branch of
+`fetch()` has never executed — there is no `wget` on this machine, `dl-9-wget-only` is written
+and **skipped**, and CI's ubuntu runner is the first place it will run. Download atomicity
+rests on the same-filesystem `mv` and its comment, since a harness cannot interrupt a transfer
+mid-flight. And both workflow files are, by construction, untested in anger.
+
+**Downstream:** `prove-ci-and-cut-v0.1.0` now has everything it needs on `main` — both
+workflows exist, so its step 2 (watch CI's first real run) is unblocked the moment `main` is
+pushed. That task is curator-run by Checkpoint 1 ruling and must never be set `ready`.
+
+**Worktree:** `../todo-release-binaries-and-ci` removed by the executor before this checkpoint.
