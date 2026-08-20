@@ -25,10 +25,22 @@ usage:
   tdo [--version] <command> [flags]
 
 commands:
-  tui       open the popup TUI
-  doctor    check the toolchain and database wiring
-  version   print the version
-  help      print this message
+  add "text" [--session|--dir|--global]   add a task (default: sticky scope)
+  list [--scope=session|dir|global|all] [--all] [--json]
+                                          list tasks (default: the active set)
+  done <id>                               mark a task complete
+  rm <id>                                 delete a task
+  count [--pending] [--scope=...]         print a bare count
+  tui                                     open the popup TUI
+  doctor                                  check the toolchain and database wiring
+  version                                 print the version
+  help                                    print this message
+
+Every command accepts --db <path>. Exit codes: 0 ok, 1 error, 2 usage.
+Scope flags may come before or after the text. Task text that starts with a
+dash needs a "--" separator: tdo add --global -- "-n is not a flag".
+Outside tmux, session scope is unavailable and --session fails rather than
+filing the task somewhere else.
 `
 
 // Run dispatches args (os.Args[1:]) and returns the process exit code.
@@ -45,6 +57,16 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "--help", "-h", "help":
 		fmt.Fprint(stdout, usage)
 		return 0
+	case "add":
+		return runAdd(args[1:], stdout, stderr)
+	case "list":
+		return runList(args[1:], stdout, stderr)
+	case "done":
+		return runDone(args[1:], stdout, stderr)
+	case "rm":
+		return runRm(args[1:], stdout, stderr)
+	case "count":
+		return runCount(args[1:], stdout, stderr)
 	case "tui":
 		return runTUI(args[1:], stderr)
 	case "doctor":

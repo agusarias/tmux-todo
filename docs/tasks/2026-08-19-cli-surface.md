@@ -1,7 +1,7 @@
 # CLI Surface
 
-**Status:** in-progress
-**Worktree:** ../todo-cli-surface
+**Status:** review
+**Worktree:** none (removed after merge)
 
 ## Goal
 Build the non-interactive surface over the shared core: `tdo add` with scope flags,
@@ -247,3 +247,248 @@ not-found path. (6) ~~The purge call.~~ struck. (7) Usage string and verificatio
 - *`--scope=all` plus the active-merged default are easy to conflate* in `filter()`: "no
   flag" and "all" are different, and an empty `store.Filter.Scopes` means *all* in the store's
   API, so the flagless case must populate `Scopes` explicitly. The likeliest bug in this task.
+
+### 2026-08-20 (executor) — three decisions taken while implementing
+
+All three are `how`, inside the plan's own drift clause. None touches Goal, Constraints
+or the Definition of done.
+
+1. **The resolution seam is `var newResolver = scope.NewResolver`, not
+   `var resolveScopes = scope.Resolve`** (refinement 4 named the latter). `Resolve()`
+   returns only a `Resolved`, and refinement 5 needs the *`Resolver`* as well, because
+   `StickyDefault` is a method on it. One seam handing back the receiver gives both, and it
+   is the constructor itself — so a test can assert that the production path reads `$TMUX`
+   (`TestAddRealSeamSeesTmux`) rather than only that an injected fake behaves.
+
+2. **Flag-order independence needed a FlagSet-aware splitter, not a leading-positional
+   hoist.** Refinement 1's fix — move leading positionals past the flags — breaks the moment
+   `--db` is in play: `add "text" --db path` reorders to `add --db "text" path`, and the
+   database flag silently swallows the task text. Whether the token after a flag is its
+   *value* or a positional is a question only the FlagSet can answer (boolean flags take no
+   value), so `splitArgs` asks it. `parseArgs` is then shared by all five commands, which
+   also makes `tdo done 7 --db /x` work — pinned by `TestMutationFlagAfterTheID`.
+
+3. **Task text starting with a dash requires an explicit `--`.** This is a real tension in
+   refinement 1, and it resolves against absorbing dash-leading tokens as text: if they were
+   absorbed, `tdo add x -sesion` would file a task named "-sesion" and exit 0 — the exact
+   silent-wrong-scope failure the hoist exists to prevent. So a dash-leading token stays a
+   flag (usage error, exit 2), and `tdo add --global -- "-n is not a flag"` is the escape
+   hatch, as in every other Unix CLI. Documented in the usage string and pinned both ways by
+   `TestAddTextStartingWithADash`.
+
+## Evidence
+
+**Merge commit:** `MERGE_HASH_PLACEHOLDER` (branch `cli-surface`, merged into local `main`,
+not pushed).
+
+### `go test ./internal/cli/ -v` — 33 tests, 42 including subtests, all pass
+
+25 of these are new. The four the Verification section names are marked.
+
+```
+--- PASS: TestAddHonoursScopeFlagInEitherOrder (0.01s)      <- arg-order trap, both orders
+--- PASS: TestAddFallsBackToTheStickyDefault (0.01s)
+--- PASS: TestAddSessionOutsideTmuxFails (0.00s)            <- outside-tmux --session
+--- PASS: TestAddSessionOutsideTmuxThroughTheRealSeam (0.00s)
+--- PASS: TestAddRealSeamSeesTmux (0.00s)
+--- PASS: TestAddUsageErrors (0.00s)
+--- PASS: TestAddTextStartingWithADash (0.01s)
+--- PASS: TestListMergedSetIsInTierOrder (0.00s)            <- tier ordering
+--- PASS: TestListScopeAllIncludesInactiveScopes (0.00s)
+--- PASS: TestListNarrowsToOneScope (0.01s)
+--- PASS: TestListUnavailableScopeFails (0.01s)             <- Ruling A, list *and* count
+--- PASS: TestListAndCountRejectAnUnknownScope (0.00s)
+--- PASS: TestListHidesDoneUntilAllIsGiven (0.00s)
+--- PASS: TestListEmptyIsSilentAndSucceeds (0.00s)
+--- PASS: TestListRejectsPositionalArguments (0.00s)
+--- PASS: TestDoneAndRm (0.00s)
+--- PASS: TestDoneAndRmOnAnUnknownIDFail (0.00s)            <- unknown-id exit code
+--- PASS: TestDoneAndRmUsageErrors (0.00s)
+--- PASS: TestMutationFlagAfterTheID (0.00s)
+--- PASS: TestCountTotalAndPending (0.01s)
+--- PASS: TestEveryCommandTakesDB (0.01s)
+--- PASS: TestUsageListsEveryCommand (0.00s)
+--- PASS: TestJSONGoldenBytes (0.00s)                       <- JSON golden, unit leg
+--- PASS: TestJSONEmptyResultIsAnEmptyArray (0.00s)
+--- PASS: TestListJSONMatchesGolden (0.00s)                 <- JSON golden, end-to-end leg
+PASS
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.640s
+```
+
+The golden file was **hand-written from DoD 5's literal**, not captured from program output,
+and matched the implementation byte-for-byte on the first run — so the contract in the brief
+and the bytes on the wire are the same thing, not just self-consistent.
+
+### DoD 11 sweep
+
+```
+$ go test ./...
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.331s
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.790s
+ok  	github.com/agusarias/tmux-todo/internal/store	0.698s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.734s
+ok  	github.com/agusarias/tmux-todo/internal/tui	1.113s
+
+$ TZ=Asia/Tokyo go test ./...          # the golden must not depend on the machine's zone
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.668s
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.753s
+(store, task, tui cached ok)
+
+$ make lint                            # go vet ./... + gofmt check
+go vet ./...
+$ gofmt -l .
+(empty)
+
+$ make build && otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+# no libsqlite3 — CGO_ENABLED=0 still holds
+```
+
+`TestJSONGoldenBytes` additionally sets `time.Local` to a fixed +09:00 zone directly rather
+than relying on `TZ`: the time package resolves the local zone once, so an env var set inside
+a test can arrive too late to matter. Setting `time.Local` makes the assertion actually able
+to fail if `rfc3339` ever loses its `.UTC()`.
+
+### End-to-end transcript, run **inside a real tmux session** so session scope is live
+
+A plain tmux pane, not `display-popup` (which needs an attached client). Session name
+`tdo-e2e`, throwaway `--db`.
+
+```
+$ tdo add "rebase onto main" --session
+1
+$ tdo add "update README" --dir
+2
+$ tdo add "call the dentist" --global
+3
+
+$ tdo list
+1 [ ] session:tdo-e2e       rebase onto main
+2 [ ] dir:~/workspace/todo  update README
+3 [ ] global                call the dentist
+
+$ tdo list --json | jq .
+{
+  "tasks": [
+    {
+      "id": 1,
+      "text": "rebase onto main",
+      "done": false,
+      "done_at": null,
+      "scope": { "kind": "session", "key": "tdo-e2e" },
+      "created_at": "2026-08-20T05:08:33Z"
+    },
+    {
+      "id": 2,
+      "text": "update README",
+      "done": false,
+      "done_at": null,
+      "scope": { "kind": "dir", "key": "/Users/agusarias/workspace/todo" },
+      "created_at": "2026-08-20T05:08:33Z"
+    },
+    {
+      "id": 3,
+      "text": "call the dentist",
+      "done": false,
+      "done_at": null,
+      "scope": { "kind": "global", "key": "" },
+      "created_at": "2026-08-20T05:08:33Z"
+    }
+  ]
+}
+
+$ tdo done 2
+exit=0
+$ tdo list
+1 [ ] session:tdo-e2e  rebase onto main
+3 [ ] global           call the dentist
+$ tdo list --all
+1 [ ] session:tdo-e2e       rebase onto main
+2 [x] dir:~/workspace/todo  update README
+3 [ ] global                call the dentist
+
+$ tdo rm 3
+exit=0
+$ tdo count
+2
+$ tdo count --pending
+1
+$ tdo count --scope=session --pending
+1
+```
+
+Two things worth noting in that transcript. The `dir` key is
+`/Users/agusarias/workspace/todo` even though the binary ran from the
+`todo-cli-surface` **worktree** — the worktree folded into its main repo, exactly as the
+scope rules promise. And the plain output's columns re-tighten between `list` and
+`list --all` because they are sized from the rows present; that is a deliberate property of
+the human-facing format, which is explicitly not a compatibility promise.
+
+### Outside tmux: the three Ruling A / DoD 2 failures
+
+```
+$ env -u TMUX tdo add "should not land" --session
+tdo: session scope: scope unavailable in this context (not inside tmux)
+exit=1
+$ env -u TMUX tdo list --scope=session
+tdo: session scope: scope unavailable in this context (not inside tmux)
+exit=1
+$ env -u TMUX tdo count --scope=session
+tdo: session scope: scope unavailable in this context (not inside tmux)
+exit=1
+```
+
+Reads fail exactly as writes do, and stdout stays empty — asserted by
+`TestListUnavailableScopeFails` for both `list` and `count`.
+
+### Timing: 500-row database, real binary, 30 runs each
+
+```
+outside tmux                                        inside tmux (one display-message)
+tdo count           median  8.50 ms  p90 10.05      tdo count          median 14.56 ms  p90 16.55
+tdo count --pending median  9.69 ms  p90 24.29      tdo count --pending median 14.32 ms  p90 18.54
+tdo count --scope=all median 9.16 ms  p90 10.21
+tdo list            median 10.16 ms  p90 11.18
+tdo list --json     median 11.96 ms  p90 36.02
+```
+
+The ~6ms difference is the one `tmux display-message` scope resolution costs, as CLAUDE.md
+predicts. `tdo count` inside tmux — the statusline case, and the only plausibly hot path — is
+~14.5ms against a 100ms budget. The occasional p90 spike is filesystem noise on a cold page
+cache; the min never moved.
+
+### Definition of done, item by item
+
+| # | Status | Evidence |
+|---|---|---|
+| 1 | ✅ | `TestAddHonoursScopeFlagInEitherOrder` (3 orders incl. `--db` in between), `TestAddUsageErrors` (0 / 2+ positionals, two scope flags → exit 2), id printed in the transcript |
+| 2 | ✅ | `TestAddSessionOutsideTmuxFails` + `...ThroughTheRealSeam`; transcript above |
+| 3 | ✅ | `TestListMergedSetIsInTierOrder`, `TestListScopeAllIncludesInactiveScopes`, `TestListNarrowsToOneScope`, `TestListUnavailableScopeFails`, `TestListAndCountRejectAnUnknownScope` |
+| 4 | ✅ | `TestListHidesDoneUntilAllIsGiven`; column alignment visible in the transcript |
+| 5 | ✅ | `testdata/list.json`, pinned by both golden legs; `TestJSONEmptyResultIsAnEmptyArray` covers `{"tasks":[]}` for nil *and* empty |
+| 6 | ✅ | `TestDoneAndRm`, `TestDoneAndRmOnAnUnknownIDFail` (exit 1, names the id, database unchanged) |
+| 7 | ✅ | `TestCountTotalAndPending`; one `filter()` in `env.go` serves both `list` and `count` |
+| 8 | ✅ | `TestEveryCommandTakesDB`; exit codes asserted throughout, `usageError` is the single 1-vs-2 decision point |
+| 9 | ✅ struck | `grep -rn PurgeDone internal/cli/` → no match. No purge call was written |
+| 10 | ✅ | All tests drive `cli.Run` with captured writers against real DBs in `t.TempDir()` |
+| 11 | ✅ | sweep above |
+| 12 | ✅ | `TestUsageListsEveryCommand`; usage also documents `--db`, the exit codes, flag order and the `--` escape |
+
+### Suggested CLAUDE.md additions (for close-out — Step 7 is the curator's)
+
+Two pitfalls this task uncovered that the next session would otherwise re-derive:
+
+- **`flag` stops at the first positional, and reordering around it needs the FlagSet.** A
+  trailing `--global` lands in `fs.Args()` and is silently ignored — a wrong-scope task at
+  exit 0. `cli.parseArgs` hoists flag tokens ahead of positionals, but the hoist must ask the
+  FlagSet whether each flag consumes the next token (`--db path`) or not (`--global`), or the
+  reorder feeds the task text to `--db`. Dash-leading task text therefore needs an explicit
+  `--`; that is deliberate, since absorbing dash tokens as text would swallow typo'd flags.
+- **A golden file written by hand beats one captured from output.** `testdata/list.json` was
+  typed from the brief's DoD literal and matched on the first run, which is what makes it
+  evidence that the *contract* is implemented rather than evidence that the code is
+  self-consistent. Capturing the golden from `tdo list --json` would have pinned any bug just
+  as firmly.
