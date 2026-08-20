@@ -37,6 +37,13 @@ const (
 	// pane, which scrolls the top of the list off screen rather than clipping
 	// the bottom — the first rows to vanish are the session tier and the tier
 	// labels, i.e. exactly what the merged view exists to show.
+	//
+	// It stays a constant rather than becoming computed, because every line it
+	// counts is now one row *by construction*: the title, the footer and the
+	// single-line body states are each truncated to contentWidth before they
+	// are assembled. The constant was what made the footer bug invisible, so
+	// the invariant it depends on is asserted directly by
+	// TestFrameNeverExceedsThePane rather than left as a comment.
 	chromeHeight = 6
 	// chromeWidth is the columns the box costs: two border columns plus
 	// boxStyle's padding of two on each side. Rows sized to the full width
@@ -153,7 +160,7 @@ func New(cfg Config) Model {
 		width:    defaultWidth,
 		height:   defaultHeight,
 	}
-	m.vp = viewport.New(m.listWidth(), m.listHeight())
+	m.vp = viewport.New(m.contentWidth(), m.listHeight())
 	return m
 }
 
@@ -254,7 +261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Popups do not resize once open, so this rarely fires — but sizing
 		// belongs to the tmux integration task, not to a hardcoded constant.
 		m.width, m.height = msg.Width, msg.Height
-		m.vp.Width = m.listWidth()
+		m.vp.Width = m.contentWidth()
 		m.vp.Height = m.listHeight()
 		m.refreshViewport()
 		return m, nil
@@ -367,8 +374,16 @@ func (m *Model) clampCursor() {
 	}
 }
 
-// listWidth is how many columns a row gets, inside the box's border and padding.
-func (m Model) listWidth() int {
+// contentWidth is how many columns anything inside the box gets, once its
+// border and padding are paid for.
+//
+// *Every* line View assembles must fit this, not just the task rows. lipgloss
+// wraps an over-wide line rather than clipping it, so one long chrome line
+// silently becomes two — and then the frame is taller than chromeHeight
+// promises. That is how the footer shipped a bug: at 48 columns it wrapped, the
+// frame ran a row over the pane, and the terminal scrolled the top border and
+// the session tier away.
+func (m Model) contentWidth() int {
 	if w := m.width - chromeWidth; w > 0 {
 		return w
 	}
@@ -410,6 +425,15 @@ func (m Model) View() string {
 	// The box is pinned to the popup width so its border does not jump around
 	// as the content narrows — filtering to one tier should not visibly resize
 	// the frame. The -2 is the border's own two columns.
+	return clampHeight(m.frame(), m.height)
+}
+
+// frame assembles the popup before the height backstop is applied.
+//
+// Split out from View so a test can assert the frame *already* fits the pane —
+// if it only checked View's output, clampHeight would hide a miscounted
+// chromeHeight by silently trimming the overflow.
+func (m Model) frame() string {
 	box := boxStyle.Width(m.width - 2)
 	return box.Render(strings.Join([]string{
 		m.titleLine(),
@@ -420,12 +444,39 @@ func (m Model) View() string {
 	}, "\n"))
 }
 
-func (m Model) titleLine() string {
-	title := titleStyle.Render("tdo")
-	if m.filter != "" {
-		return title + hintStyle.Render(fmt.Sprintf("  filter: %s", m.filter))
+// clampHeight drops any rows past the pane's height.
+//
+// A backstop, not the mechanism: with every chrome line truncated to one row
+// the frame already fits, and this should never fire. It exists because the
+// failure it prevents is asymmetric — a frame one row too tall makes the
+// terminal *scroll*, which costs the rows at the **top** (the box border, the
+// session tier, the tier labels), while clipping our own bottom row costs the
+// bottom border. Losing a border beats losing the list.
+func clampHeight(frame string, height int) string {
+	if height <= 0 {
+		return frame
 	}
-	return title
+	lines := strings.Split(frame, "\n")
+	if len(lines) <= height {
+		return frame
+	}
+	return strings.Join(lines[:height], "\n")
+}
+
+func (m Model) titleLine() string {
+	const name = "tdo"
+	width := m.contentWidth()
+	if m.filter == "" {
+		return titleStyle.Render(truncate(name, width))
+	}
+	// Truncation is applied to the plain text and the styles wrap the result:
+	// slicing a rendered string would cut through an ANSI escape.
+	room := width - lipgloss.Width(name)
+	if room <= 0 {
+		return titleStyle.Render(truncate(name, width))
+	}
+	suffix := fmt.Sprintf("  filter: %s", m.filter)
+	return titleStyle.Render(name) + hintStyle.Render(truncate(suffix, room))
 }
 
 // body is the list, or whichever empty state applies.
@@ -434,13 +485,16 @@ func (m Model) body() string {
 		// The store's errors already name the operation ("list tasks: …",
 		// "complete task 3: …"), so prefixing our own guess would only risk
 		// contradicting them.
-		return errStyle.Render(m.err.Error())
+		// Truncated like every other chrome line. Losing the tail of an error
+		// is a real cost, but a wrapped one breaks the frame, and the store
+		// puts the operation at the *front* of its messages.
+		return errStyle.Render(truncate(m.err.Error(), m.contentWidth()))
 	}
 	if !m.ready {
-		return emptyStyle.Render("loading…")
+		return emptyStyle.Render(truncate("loading…", m.contentWidth()))
 	}
 	if len(m.tasks) == 0 {
-		return emptyStyle.Render(m.emptyText())
+		return emptyStyle.Render(truncate(m.emptyText(), m.contentWidth()))
 	}
 	return m.vp.View()
 }
@@ -472,9 +526,14 @@ func filterKey(kind task.ScopeKind) string {
 // footer lists only the keys this build actually binds. docs/design.md's mock
 // shows the end state (a/e/space/d/s/g included); those keys belong to the three
 // follow-on UI tasks, and advertising them before they work would be a lie.
+// The line is truncated to the content width because Version is stamped from
+// `git describe --tags --always --dirty` (Makefile), so its length — and with
+// it the minimum width the popup can render at — varies with the build's git
+// state. A hint line is the right thing to lose the tail of; the frame is not.
 func (m Model) footer() string {
-	return hintStyle.Render(fmt.Sprintf(
-		"1/2/3 filter · j/k move · space done · q quit · v%s", m.cfg.Version))
+	return hintStyle.Render(truncate(fmt.Sprintf(
+		"1/2/3 filter · j/k move · space done · q quit · v%s", m.cfg.Version),
+		m.contentWidth()))
 }
 
 // Run starts the popup and blocks until it exits.

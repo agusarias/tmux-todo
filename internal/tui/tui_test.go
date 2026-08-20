@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/task"
@@ -619,5 +620,141 @@ func TestQueryFailureIsSurfaced(t *testing.T) {
 func TestQueryTimeoutIsBounded(t *testing.T) {
 	if queryTimeout <= 0 || queryTimeout > 10*time.Second {
 		t.Errorf("queryTimeout = %v, want a small positive bound", queryTimeout)
+	}
+}
+
+// longVersion is what `git describe --tags --always --dirty` produces on a
+// dirty working tree — the Makefile stamps Version from exactly that, so the
+// footer's length, and with it the narrowest width the popup can render at,
+// varies with the build's git state rather than being a property of the code.
+const longVersion = "v0.1.0-3-gec132f9-dirty"
+
+// TestFrameNeverExceedsThePane is DoD 20, and it is the point of this
+// fix-forward pass: the missing test was the root cause, not the missing
+// truncate.
+//
+// Every frame bug in this task — three of them — was found by a capture at a
+// single fixed 80x20 size, and none of the 38 unit tests asserted anything about
+// the *assembled* frame. lipgloss wraps an over-wide line instead of clipping
+// it, so one long chrome line quietly becomes two rows; the frame then runs past
+// the pane, and a terminal responds by scrolling, which eats the rows at the top
+// — the box border, the session tier, the tier labels. Truncating footer() alone
+// would have fixed the instance and left the class open for the next key added
+// to the hint line.
+func TestFrameNeverExceedsThePane(t *testing.T) {
+	db := openDB(t)
+	// Enough rows to fill any viewport under test, across all three tiers so
+	// the widest tier labels are in play too.
+	for i := 0; i < 40; i++ {
+		scope := []task.Scope{sessionScope, dirScope, globalScope}[i%3]
+		add(t, db, fmt.Sprintf("task %02d with a fairly typical amount of text", i), scope)
+	}
+	scopes := []task.Scope{sessionScope, dirScope, globalScope}
+
+	sizes := []struct{ w, h int }{
+		{40, 10}, {44, 12}, {48, 12}, {52, 14}, {64, 14},
+		{72, 16}, {80, 20}, {100, 24}, {120, 30},
+	}
+	versions := []string{"dev", "ec132f9", longVersion}
+
+	for _, version := range versions {
+		for _, size := range sizes {
+			for _, filter := range []string{"", "1", "2", "3"} {
+				name := fmt.Sprintf("v=%s/%dx%d/filter=%q", version, size.w, size.h, filter)
+				t.Run(name, func(t *testing.T) {
+					m := newLoaded(t, Config{
+						DB: db, Scopes: scopes, Home: "/Users/x", Version: version,
+					})
+					sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+					m = sized.(Model)
+					if filter != "" {
+						m = pressAndSettle(t, m, filter)
+					}
+
+					// Asserted on the *unclamped* frame: checking View's
+					// output would let the clampHeight backstop hide a
+					// miscounted chromeHeight instead of failing on it.
+					lines := strings.Split(m.frame(), "\n")
+					if len(lines) > size.h {
+						t.Errorf("frame is %d rows in a %d-row pane; the terminal will scroll and the top rows are lost:\n%s",
+							len(lines), size.h, m.frame())
+					}
+					if got := strings.Split(m.View(), "\n"); len(got) != len(lines) {
+						t.Errorf("the height backstop fired (%d rows -> %d); it is a safety net, not the mechanism",
+							len(lines), len(got))
+					}
+					for i, line := range lines {
+						if w := lipgloss.Width(line); w > size.w {
+							t.Errorf("line %d is %d columns in a %d-column pane: %q",
+								i, w, size.w, line)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestChromeLinesFitTheContentWidth pins the invariant chromeHeight's constant
+// depends on: each chrome line is exactly one row after truncation. If this
+// breaks, chromeHeight is silently wrong and the frame grows.
+func TestChromeLinesFitTheContentWidth(t *testing.T) {
+	db := openDB(t)
+	add(t, db, "something", globalScope)
+
+	for _, width := range []int{20, 30, 40, 44, 48, 64, 80} {
+		m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Version: longVersion})
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 20})
+		m = sized.(Model)
+
+		for _, tc := range []struct {
+			name string
+			line string
+		}{
+			{"footer", m.footer()},
+			{"title", m.titleLine()},
+			{"filtered title", pressAndSettle(t, m, "1").titleLine()},
+			{"empty state", pressAndSettle(t, m, "1").body()},
+		} {
+			if strings.Contains(tc.line, "\n") {
+				t.Errorf("width %d: %s spans multiple rows: %q", width, tc.name, tc.line)
+			}
+			if w := lipgloss.Width(tc.line); w > m.contentWidth() {
+				t.Errorf("width %d: %s is %d columns, over the %d-column content width: %q",
+					width, tc.name, w, m.contentWidth(), tc.line)
+			}
+		}
+	}
+}
+
+// TestFooterKeepsTheKeysAndDropsTheVersion — when the footer must be cut, the
+// keybindings are the part worth keeping; the version is the tail.
+func TestFooterKeepsTheKeysAndDropsTheVersion(t *testing.T) {
+	db := openDB(t)
+	add(t, db, "something", globalScope)
+	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Version: longVersion})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 48, Height: 12})
+
+	footer := sized.(Model).footer()
+	if !strings.Contains(footer, "1/2/3 filter") {
+		t.Errorf("truncation ate the first keybinding: %q", footer)
+	}
+	if !strings.Contains(footer, ellipsis) {
+		t.Errorf("footer was cut without an ellipsis to show it: %q", footer)
+	}
+}
+
+// TestClampHeightIsABackstop — the truncation above should mean it never fires,
+// so prove it does the right thing when handed something over-tall anyway.
+func TestClampHeightIsABackstop(t *testing.T) {
+	frame := "one\ntwo\nthree\nfour"
+	if got := clampHeight(frame, 2); got != "one\ntwo" {
+		t.Errorf("clampHeight(4 rows, 2) = %q, want the first two", got)
+	}
+	if got := clampHeight(frame, 10); got != frame {
+		t.Error("clampHeight shortened a frame that already fits")
+	}
+	if got := clampHeight(frame, 0); got != frame {
+		t.Error("clampHeight with an unknown height should leave the frame alone")
 	}
 }
