@@ -78,6 +78,13 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   read and the apply loop, so the losing process waits and then sees the version
   already current. Tests that race an *already-migrated* database prove nothing
   about this — that was the DoD-9 gap that shipped a bug.
+- **A test that injects a dependency cannot prove the production default is
+  wired.** This has now shipped two bugs. `scope.Resolve()` was
+  `Resolver{}.Resolve()` with an empty `TmuxEnv`, so session scope was
+  unreachable in the binary while all 28 tests passed — every one of them set
+  `TmuxEnv` by hand. Whenever a seam has a zero value that *means* something
+  (here `""` = "not inside tmux"), the constructor is the thing to test: exercise
+  the real entry point and assert it agrees with an explicitly-wired one.
 - **A multi-statement `Exec` applies statements up to the first failure** and
   leaves them there — hence the transaction around each migration. That per-file
   unit is a `SAVEPOINT` *inside* the one outer `BEGIN IMMEDIATE`, so a failed

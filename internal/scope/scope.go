@@ -24,8 +24,16 @@ import (
 // terminal fails loudly instead of filing the task somewhere unexpected.
 var ErrUnavailable = errors.New("scope unavailable in this context")
 
-// Resolver reads the environment. Its zero value talks to the real one; tests
-// fill the fields in so they need neither a tmux server nor a git checkout.
+// Resolver reads the environment. Tests fill the fields in so they need neither
+// a tmux server nor a git checkout.
+//
+// Use NewResolver to talk to the real environment — **not** the zero value.
+// Run and Getwd default to the real thing when nil, but TmuxEnv cannot: "" is a
+// meaningful value there, meaning "not inside tmux", so a zero Resolver reports
+// session scope as permanently unavailable. That asymmetry shipped as a bug
+// once (see the brief for docs/tasks/2026-08-19-scope-resolution.md): every test
+// injected TmuxEnv by hand, so the whole suite passed while the shipped binary
+// could never see a tmux session.
 type Resolver struct {
 	// TmuxEnv is the value of $TMUX. Empty means "not inside tmux", which makes
 	// session scope unavailable and skips the tmux subprocess entirely.
@@ -48,8 +56,17 @@ type Resolved struct {
 	Global task.Scope
 }
 
+// NewResolver returns a Resolver wired to the real environment.
+//
+// Callers that need the receiver — StickyDefault and SetStickyDefault are
+// methods — must build one with this rather than with Resolver{}, or session
+// scope silently disappears for them too.
+func NewResolver() Resolver {
+	return Resolver{TmuxEnv: os.Getenv("TMUX")}
+}
+
 // Resolve resolves the current context against the real environment.
-func Resolve() (Resolved, error) { return Resolver{}.Resolve() }
+func Resolve() (Resolved, error) { return NewResolver().Resolve() }
 
 // Resolve reports the scopes available in this context. It returns an error only
 // when nothing at all could be determined; an individual scope being

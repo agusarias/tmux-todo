@@ -1,7 +1,7 @@
 # Scope Resolution
 
-**Status:** ready
-**Worktree:** none
+**Status:** review
+**Worktree:** /Users/agusarias/workspace/todo-scope-resolution
 
 ## Goal
 Resolve the three independent scopes for the current context: `global`, `dir` (active
@@ -198,6 +198,26 @@ Constraints and DoD are unchanged — this is a `how` fix, not a scope event.
   own suggestion: **CLAUDE.md keeps commands, layout and cross-cutting rules; per-package
   specifics move into package doc comments** where the code is. Applies to the six remaining
   tasks, so nobody re-raises it per-task.
+
+## Decisions (fix-forward)
+- **2026-08-20 (executor):** The fix is a `NewResolver()` constructor that captures the
+  environment, with `Resolve()` built on it — not a bare `os.Getenv` inside `Resolve`. The
+  curator's item 1 only required the package-level entry point to be wired, but
+  `StickyDefault` and `SetStickyDefault` are *methods*, so a caller needing the receiver had
+  no correct way to build one and would have re-created the identical bug. The curator's own
+  downstream note says `cli-surface`'s `env` struct must hold a `scope.Resolver`; that task
+  now has `NewResolver()` to hold instead of `Resolver{}`.
+- **2026-08-20 (executor):** The zero `Resolver` deliberately still does **not** read `$TMUX`.
+  Making it do so would have been the other obvious fix and it is wrong: `TmuxEnv: ""` is
+  load-bearing in the tests as "not inside tmux" (`scope_test.go:75,144`), so a fallback to
+  the ambient environment would make those tests read whatever the developer's shell happens
+  to be. The seam stays; only the default moved. The `Resolver` doc comment now states the
+  asymmetry — `Run`/`Getwd` default to the real thing when nil, `TmuxEnv` cannot, because ""
+  is meaningful there — which is the sentence whose absence caused the bug.
+- **2026-08-20 (executor):** `TestStickyDefaultReachesSessionInTheRealEnvironment` sets
+  `StateDir` to a `t.TempDir()`. The production sticky default lives in the user's real XDG
+  state dir, and a test that writes `session` into it would silently change the user's
+  configured default.
 
 ## Plan
 Single package, `internal/scope`, replacing the doc-only stub. No other package changes —
@@ -397,3 +417,157 @@ and it is three lines delegating to `internal/cli`.
 | 9 | Degradation session → dir → global | met — 6-row table test |
 | 10 | `go test` / `go vet` / `gofmt` clean; no libsqlite3 | met |
 | 11 | Timed resolution recorded, within ~10ms | met at the median (5.7ms); tail to 12ms disclosed above |
+
+---
+
+## Evidence (fix-forward, 2026-08-20)
+
+Second execution, addressing only the three items in **Fix-forward scope**. The original
+implementation commit `03d96c4` stays on `main` untouched; this is a follow-up on top.
+
+Toolchain `go1.26.6 darwin/arm64`. Test count in `internal/scope`: **28 → 31**, zero skips.
+
+### The bug is fixed, and the test that proves it fails without the fix
+
+The whole point of this pass is that the previous 28 tests could not see the defect, so
+each new guard was run against the broken code before being trusted.
+
+**Restoring the exact shipped bug** (`func Resolve() ... { return Resolver{}.Resolve() }`),
+from inside a live tmux session:
+
+```
+--- FAIL: TestPackageResolveMatchesTheRealEnvironment
+    Resolve() session = <absent>, but Resolver{TmuxEnv: $TMUX} sees session=scopemut
+      — the package entry point is not wired to the real environment
+    Resolve() reports no session scope from inside a live tmux session
+```
+
+**Breaking the new default** (`NewResolver()` returning `Resolver{}`) fails all four
+real-environment guards, including the user-visible consequence the curator named:
+
+```
+--- FAIL: TestResolveAgainstRealEnvironment
+    Session is absent despite a reachable tmux server
+--- FAIL: TestPackageResolveMatchesTheRealEnvironment
+    Resolve() session = <absent>, but Resolver{TmuxEnv: $TMUX} sees session=scopemut2
+--- FAIL: TestNewResolverCarriesTmuxEnv
+    NewResolver().TmuxEnv = "", want $TMUX "/private/tmp/tmux-501/default,37572,65"
+--- FAIL: TestStickyDefaultReachesSessionInTheRealEnvironment
+    StickyDefault = "dir" inside tmux with session stored, want "session"
+      — session scope is unreachable through the production path
+```
+
+With the fix in place, from inside tmux:
+
+```
+=== RUN   TestResolveAgainstRealEnvironment
+    resolved in 5.641125ms (TMUX="/private/tmp/tmux-501/default,37572,63")
+      session: session=scoperun
+      dir:     dir=/Users/agusarias/workspace/todo
+--- PASS: TestResolveAgainstRealEnvironment
+=== RUN   TestPackageResolveMatchesTheRealEnvironment
+    live tmux: Resolve() session = session=scoperun
+--- PASS: TestPackageResolveMatchesTheRealEnvironment
+--- PASS: TestNewResolverCarriesTmuxEnv
+--- PASS: TestStickyDefaultReachesSessionInTheRealEnvironment
+```
+
+### Item 3 — the stale-`$TMUX` failure, before and after
+
+The old gate keyed off `$TMUX` being non-empty. Reproducing the curator's exact command
+against the old gate, and then against the new one:
+
+```
+# old gate
+$ TMUX="/tmp/fake,1,0" go test ./internal/scope/ -run TestResolveAgainstRealEnvironment
+    scope_test.go:275: Session is absent despite $TMUX being set
+FAIL
+
+# new gate (tmuxAlive: $TMUX set AND `tmux display-message` succeeds)
+$ TMUX="/tmp/fake,1,0" go test ./internal/scope/
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.688s
+
+$ env -u TMUX go test ./internal/scope/
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.659s
+```
+
+The timing probe DoD 11 depends on is kept — only its precondition changed.
+
+### Full suite inside a live tmux session
+
+31 tests, **0 skips**, including `TestAgreesWithGitBinary` actually running (DoD 7):
+
+```
+--- PASS: TestAgreesWithGitBinary (0.42s)
+...
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.682s
+EXIT=0
+```
+
+Whole repo: `make test` green across all packages, `make lint` (`go vet ./...`) silent,
+`gofmt -l .` empty, and `CGO_ENABLED=0 make build` still links no libsqlite3:
+
+```
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+```
+
+### DoD 11 — timing re-measured
+
+12 fresh processes inside tmux, following the precedent this task set of never trusting one
+sample:
+
+| n | min | median | max |
+|---|---|---|---|
+| 12 | 4.24 ms | **4.53 ms** | 9.07 ms |
+
+Within the ~10ms budget. The 9.07ms max is the first `exec` of the run — the cold-page
+outlier already documented in the original Evidence — and every subsequent sample sits
+between 4.2 and 5.3ms. Adding `os.Getenv("TMUX")` cost nothing measurable.
+
+### End-to-end: the product actually works now
+
+The user-visible payoff, and the strongest evidence that the fix reaches production rather
+than just the test binary. The real `bin/tdo` binary in a live tmux session, against a
+seeded throwaway database (`$XDG_DATA_HOME`), showing the session tier present for the
+first time:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  tdo                                                                         │
+│                                                                              │
+│  ▸ ⌘ rebase onto main           (session: tdolive)                           │
+│    ⌘ check CI                                                                │
+│    · fix auth redirect          (dir: ~/.claude/jobs/a9c0f4db/tmp/xdg/repo)  │
+│    · write migration                                                         │
+│    ◉ call the dentist           (global)                                     │
+│                                                                              │
+│  1/2/3 filter · j/k move · q quit · vacf815b-dirty                           │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+That is `docs/design.md`'s default-view mock, produced by the shipped binary. Before this
+fix the same command rendered only the dir and global rows. `1` now filters to the session
+tier and `1` again returns to the merged list, both confirmed in the same pane.
+
+### Fix-forward Definition of done
+
+| Item | Status |
+|---|---|
+| 1 — `Resolve()` wired to the real environment; doc comment corrected | met — `NewResolver()`, and the `Resolver` comment now names the `TmuxEnv` asymmetry |
+| 2 — a test exercising `scope.Resolve()` itself | met — `TestPackageResolveMatchesTheRealEnvironment`, plus `TestNewResolverCarriesTmuxEnv` and the `StickyDefault` guard; all three shown failing against the bug above |
+| 3 — `TestResolveAgainstRealEnvironment` gated on a live server | met — `tmuxAlive()`, with the before/after commands above |
+
+DoD 3 (session key from `#{session_name}`, the item the curator marked as failing in
+production) is now met **through the documented API**, not only through an injected
+resolver. Items 1–2 and 4–11 were already met and are unchanged by this pass.
+
+### Not verified
+
+- Behaviour when `$TMUX` is set and the server is reachable but `display-message` returns
+  an unexpected format — still the existing "any failure yields empty strings" path,
+  unchanged here.
+- The `display-popup` overlay itself, which needs an attached client (CLAUDE.md). The
+  end-to-end check above runs the TUI in a plain tmux pane instead.
+
