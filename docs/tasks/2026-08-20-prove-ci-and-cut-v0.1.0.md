@@ -77,6 +77,36 @@ disagree permanently.
   leave the parent task with unprovable DoD items — or worse, invite an executor to claim a
   green CI run it could not have observed — every item requiring a remote moved here.
 
+## Pre-flight audit — 2026-08-20 (curator, before any push)
+
+Done to de-risk step 2: the plugin harness has only ever run on **macOS, bash 3.2, BSD
+userland**, and CI's `plugin` job runs it on **Ubuntu, bash 5, GNU coreutils**. A red first run
+would be indistinguishable from a broken workflow, so the portability questions were answered
+before pushing rather than after.
+
+- **No BSD-only constructs** in `tmux-todo.tmux` or `test/plugin_install_test.sh` — checked for
+  `sed -i ''`, `stat -f`, `base64 -D`, `readlink -f`, `date -r`, `grep -P`, `tail -r`,
+  `mktemp -t`. None present.
+- **The sha256 tool is resolved, not assumed**, on both sides: `sha256sum` then `shasum -a 256`.
+  Ubuntu has the first, macOS the second.
+- **The host asset is computed from `uname -s`/`uname -m`**, independently of the script under
+  test, so on the runner it becomes `tdo-linux-amd64` rather than hunting for a darwin binary.
+  A platform that maps to nothing aborts loudly instead of testing nothing.
+- **`python3` absence degrades, it does not fail**: the fixture server falls back to `file://`
+  with a printed note. ubuntu-latest ships python3, so the HTTP path should hold. *Coverage
+  note:* on the `file://` fallback `dl-3-asset-404` loses its teeth, since only a real server
+  can return a 404 — the harness header states which mode ran, so a reviewer can tell.
+- **tmux version**: the script needs `display-popup`, `#{e|-|:…}` arithmetic, `#{m:…}` and
+  `set-hook -ga` — all ≥ 3.2. Ubuntu 24.04 ships 3.4 and the workflow prints `tmux -V`, so the
+  actual version is on the record rather than assumed.
+- **`dl-9-wget-only` should finally run.** It is `SKIP`ped on this machine for want of `wget`,
+  which `release-binaries-and-ci` recorded as a genuine untested branch of `fetch()`. Ubuntu
+  has `wget`, so CI closes that gap — one of the concrete things this task buys.
+
+**Conclusion:** no blocker found. If the first run is red, the likeliest causes are runner
+image drift (the `go` job's no-tmux assertion) or something inside `apt-get install tmux`,
+not a portability defect in the harness.
+
 ## Plan
 **Approved at Checkpoint 1 on 2026-08-20.** Curator-run, approval per step, status stays
 `agreed`. The user also ruled that `docs/tasks/` publishes as-is — the rationale trail is an
