@@ -498,15 +498,60 @@ func TestPackageResolveMatchesTheRealEnvironment(t *testing.T) {
 
 // TestNewResolverCarriesTmuxEnv pins the constructor itself, so the default
 // cannot regress behind a refactor of Resolve.
+//
+// It **fakes** $TMUX rather than comparing against whatever the host has. The
+// first version of this test asserted `NewResolver().TmuxEnv == os.Getenv("TMUX")`,
+// which on a machine with no tmux — every CI runner — is `"" == ""`: it passes
+// against `return Resolver{}`, the exact bug it was written to catch. The whole
+// regression net was invisible in the only environment it would ever run in.
+// Measured, before this test changed: the mutated tree passed 36 of 36 with one
+// skip under `env -u TMUX`.
+//
+// Both directions are pinned, because satisfying one by breaking the other is a
+// refactor away: a constructor that hardcoded a non-empty string would pass the
+// first leg, and the zero value passes the second.
 func TestNewResolverCarriesTmuxEnv(t *testing.T) {
-	if got, want := NewResolver().TmuxEnv, os.Getenv("TMUX"); got != want {
-		t.Errorf("NewResolver().TmuxEnv = %q, want $TMUX %q", got, want)
-	}
-	// The zero value is the trap this task shipped; it must stay distinguishable
-	// so nobody reads Resolver{} as "the real environment" again.
-	if zero := (Resolver{}); os.Getenv("TMUX") != "" && zero.TmuxEnv != "" {
-		t.Error("Resolver{} picked up $TMUX; the injection seam is gone")
-	}
+	t.Run("carries a set TMUX", func(t *testing.T) {
+		// A sentinel the host cannot coincidentally match, so the assertion has
+		// something to be wrong about wherever it runs. It is only ever read:
+		// nothing here dials the socket.
+		const fake = "/tmp/fake-tmux-socket,1,0"
+		t.Setenv("TMUX", fake)
+
+		if got := NewResolver().TmuxEnv; got != fake {
+			t.Errorf("NewResolver().TmuxEnv = %q, want the faked $TMUX %q"+
+				" — the constructor is not reading the environment, so session scope"+
+				" is unreachable in the shipped binary", got, fake)
+		}
+		// The zero value is the trap this package shipped; it must stay
+		// distinguishable so nobody reads Resolver{} as "the real environment".
+		if zero := (Resolver{}); zero.TmuxEnv != "" {
+			t.Error("Resolver{} picked up $TMUX; the injection seam is gone")
+		}
+	})
+
+	t.Run("carries an unset TMUX", func(t *testing.T) {
+		t.Setenv("TMUX", "")
+
+		if got := NewResolver().TmuxEnv; got != "" {
+			t.Errorf("NewResolver().TmuxEnv = %q with $TMUX unset, want empty", got)
+		}
+		// The other half of the contract: outside tmux there is no session
+		// scope, rather than one with an empty key. Resolve() is the production
+		// entry point, so this is the constructor's effect and not just its
+		// field. It reaches no state dir — StickyDefault is what does that, and
+		// it is not on this path.
+		got, err := Resolve()
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if got.Session != nil {
+			t.Errorf("Resolve() invented session scope %s with $TMUX unset", scopeString(got.Session))
+		}
+		if got.Has(task.ScopeSession) {
+			t.Error("Has(session) is true with $TMUX unset")
+		}
+	})
 }
 
 // TestStickyDefaultReachesSessionInTheRealEnvironment is the user-visible half
