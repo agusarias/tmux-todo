@@ -68,6 +68,23 @@ type Config struct {
 	Home string
 	// Version is shown in the footer.
 	Version string
+	// Now is the clock the visibility cutoff is measured against. Injected, and
+	// defaulting to time.Now, for the same reason the store's DB.now is: a test
+	// can advance it 25h and prove a completed row leaves the view, which is not
+	// provable against the real clock.
+	//
+	// This is a deliberate revision of popup-tui-merged-list's note that the TUI
+	// holds no clock. An injected clock keeps that note's intent — the model is
+	// still a pure function of its inputs.
+	Now func() time.Time
+}
+
+// now reads the injected clock, falling back to the real one.
+func (c Config) now() time.Time {
+	if c.Now == nil {
+		return time.Now()
+	}
+	return c.Now()
 }
 
 // mode is the key-dispatch mode. Only normal mode exists today; the input mode
@@ -98,6 +115,11 @@ type Model struct {
 	// filter, i.e. the merged view over every active scope.
 	filter task.ScopeKind
 
+	// openedAt is when this popup opened. Rows completed before it were already
+	// done when the user arrived, so they are not "reversible in the moment"
+	// and start out hidden.
+	openedAt time.Time
+
 	tasks    []task.Task
 	cursor   int
 	vp       viewport.Model
@@ -113,17 +135,23 @@ type Model struct {
 type rowsMsg struct {
 	tasks []task.Task
 	err   error
+	// anchor is the task id the cursor should land on once the rows are in.
+	// Zero means "keep the current index". Re-anchoring by *id* rather than by
+	// index is what makes space usable twice in a row: a toggle can change how
+	// many rows are visible, and an index would drift onto a neighbour.
+	anchor int64
 }
 
 // New builds the model from cfg without touching the database; the first query
 // is issued by Init.
 func New(cfg Config) Model {
 	m := Model{
-		cfg:    cfg,
-		mode:   modeNormal,
-		view:   viewMerged,
-		width:  defaultWidth,
-		height: defaultHeight,
+		cfg:      cfg,
+		mode:     modeNormal,
+		view:     viewMerged,
+		openedAt: cfg.now(),
+		width:    defaultWidth,
+		height:   defaultHeight,
 	}
 	m.vp = viewport.New(m.listWidth(), m.listHeight())
 	return m
@@ -147,27 +175,64 @@ func (m Model) activeScopes() []task.Scope {
 	return out
 }
 
+// doneSince is the boundary below which completed rows stop being shown:
+// whichever of "this popup opened" and "one retention window ago" is later.
+//
+// In practice openedAt almost always wins — the 24h arm only bites for a popup
+// left open longer than that — but docs/design.md specifies "whichever comes
+// first", and the arithmetic is cheap. The point of the rule is that a row you
+// completed just now stays under your cursor, struck through, while one you
+// completed yesterday is already gone when you arrive.
+func (m Model) doneSince() time.Time {
+	retention := m.cfg.now().Add(-store.DoneRetention)
+	if m.openedAt.After(retention) {
+		return m.openedAt
+	}
+	return retention
+}
+
 // reloadCmd re-runs the query and replaces the rows. Every action that changes
 // what should be on screen goes through this, which is what lets the popup stay
 // open across actions instead of exiting to refresh.
-func (m Model) reloadCmd() tea.Cmd {
+func (m Model) reloadCmd() tea.Cmd { return m.reloadAnchoredTo(0) }
+
+// reloadAnchoredTo re-queries and puts the cursor back on the given task id.
+func (m Model) reloadAnchoredTo(anchor int64) tea.Cmd { return m.writeThenReload(anchor, nil) }
+
+// writeThenReload optionally performs a store write, then re-runs the query and
+// replaces the rows — one command producing one message.
+//
+// Write and re-read are deliberately the same command rather than a
+// tea.Sequence of two: the model never patches its own copy of a row to reflect
+// a write, so the store stays the single source of truth for what is done, and
+// the whole action stays a single testable step.
+func (m Model) writeThenReload(anchor int64, write func(context.Context, *store.DB) error) tea.Cmd {
 	db := m.cfg.DB
 	scopes := m.activeScopes()
+	filter := store.Filter{Scopes: scopes, IncludeDone: true, DoneSince: m.doneSince()}
+	current := m.tasks
 
-	// An empty store.Filter.Scopes means *every scope in the database*, not
-	// "the active set" (see store.Filter). So an empty active set must short
-	// circuit: querying with it would show tasks from scopes the user is not
-	// in — other sessions, other repos.
-	if db == nil || len(scopes) == 0 {
-		return func() tea.Msg { return rowsMsg{} }
-	}
-
-	filter := store.Filter{Scopes: scopes, IncludeDone: true}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		defer cancel()
+
+		if write != nil && db != nil {
+			if err := write(ctx, db); err != nil {
+				// Keep the rows on screen: a failed write changed nothing, and
+				// blanking the list would read as "your tasks are gone".
+				return rowsMsg{tasks: current, err: err, anchor: anchor}
+			}
+		}
+
+		// An empty store.Filter.Scopes means *every scope in the database*, not
+		// "the active set" (see store.Filter). So an empty active set must short
+		// circuit: querying with it would show tasks from scopes the user is not
+		// in — other sessions, other repos.
+		if db == nil || len(scopes) == 0 {
+			return rowsMsg{anchor: anchor}
+		}
 		tasks, err := db.List(ctx, filter)
-		return rowsMsg{tasks: tasks, err: err}
+		return rowsMsg{tasks: tasks, err: err, anchor: anchor}
 	}
 }
 
@@ -178,6 +243,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tasks = msg.tasks
 		m.err = msg.err
 		m.ready = true
+		if msg.anchor != 0 {
+			m.anchorCursor(msg.anchor)
+		}
 		m.clampCursor()
 		m.refreshViewport()
 		return m, nil
@@ -216,6 +284,9 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(-1)
 		return m, nil
 
+	case " ":
+		return m.toggleDone()
+
 	case "1":
 		return m.toggleFilter(task.ScopeSession)
 	case "2":
@@ -224,6 +295,39 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.toggleFilter(task.ScopeGlobal)
 	}
 	return m, nil
+}
+
+// toggleDone flips the cursor row between pending and complete.
+//
+// It is a toggle rather than a one-way action because it is the only undo the
+// product has — docs/design.md defers an undo stack — so a mis-press has to be
+// fixable by pressing the same key again.
+func (m Model) toggleDone() (tea.Model, tea.Cmd) {
+	if m.cursor < 0 || m.cursor >= len(m.tasks) || m.cfg.DB == nil {
+		return m, nil
+	}
+	target := m.tasks[m.cursor]
+
+	return m, m.writeThenReload(target.ID, func(ctx context.Context, db *store.DB) error {
+		if target.Done {
+			return db.Uncomplete(ctx, target.ID)
+		}
+		return db.Complete(ctx, target.ID)
+	})
+}
+
+// anchorCursor puts the cursor on a task id, or as close as it can get. The row
+// can legitimately be gone — uncompleting is fine, but completing a row that was
+// already outside the visibility window removes it — so this clamps rather than
+// insisting.
+func (m *Model) anchorCursor(id int64) {
+	for i, t := range m.tasks {
+		if t.ID == id {
+			m.cursor = i
+			return
+		}
+	}
+	m.clampCursor()
 }
 
 // toggleFilter switches to a single-tier view, or back to the merged view when
@@ -327,7 +431,10 @@ func (m Model) titleLine() string {
 // body is the list, or whichever empty state applies.
 func (m Model) body() string {
 	if m.err != nil {
-		return errStyle.Render("cannot read tasks: " + m.err.Error())
+		// The store's errors already name the operation ("list tasks: …",
+		// "complete task 3: …"), so prefixing our own guess would only risk
+		// contradicting them.
+		return errStyle.Render(m.err.Error())
 	}
 	if !m.ready {
 		return emptyStyle.Render("loading…")
@@ -367,7 +474,7 @@ func filterKey(kind task.ScopeKind) string {
 // follow-on UI tasks, and advertising them before they work would be a lie.
 func (m Model) footer() string {
 	return hintStyle.Render(fmt.Sprintf(
-		"1/2/3 filter · j/k move · q quit · v%s", m.cfg.Version))
+		"1/2/3 filter · j/k move · space done · q quit · v%s", m.cfg.Version))
 }
 
 // Run starts the popup and blocks until it exits.

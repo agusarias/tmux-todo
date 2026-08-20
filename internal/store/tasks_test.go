@@ -487,3 +487,223 @@ func TestConcurrentHandles(t *testing.T) {
 		}
 	}
 }
+
+// TestDoneSinceBoundsOnlyDoneRows is the single most important test in the
+// completed-task-lifecycle task. The bound exists to age *completed* rows out of
+// the view, and the obvious predicate — `AND done_at >= ?` — silently drops every
+// pending row instead, because a pending row's done_at is NULL and no comparison
+// against NULL is ever true. That failure would empty the popup.
+func TestDoneSinceBoundsOnlyDoneRows(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	base := time.Unix(1_760_000_000, 0)
+
+	freezeClock(db, base)
+	pending, err := db.Add(ctx, "still to do", globalScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	recent, err := db.Add(ctx, "just finished", globalScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	stale, err := db.Add(ctx, "finished long ago", globalScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Complete one an hour ago and one two days ago.
+	freezeClock(db, base.Add(-time.Hour))
+	if err := db.Complete(ctx, recent.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	freezeClock(db, base.Add(-48*time.Hour))
+	if err := db.Complete(ctx, stale.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	cutoff := base.Add(-DoneRetention)
+	got, err := db.List(ctx, Filter{IncludeDone: true, DoneSince: cutoff})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	ids := map[int64]bool{}
+	for _, task := range got {
+		ids[task.ID] = true
+	}
+	if !ids[pending.ID] {
+		t.Error("the pending task was filtered out by DoneSince; the predicate is catching NULL done_at")
+	}
+	if !ids[recent.ID] {
+		t.Error("a task completed inside the window is hidden")
+	}
+	if ids[stale.ID] {
+		t.Error("a task completed before the cutoff is still visible")
+	}
+
+	// Hidden is not deleted: this task never reaps rows.
+	if _, err := db.Get(ctx, stale.ID); err != nil {
+		t.Errorf("the aged-out task left the database: %v", err)
+	}
+	total, err := db.Count(ctx, Filter{IncludeDone: true})
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("Count = %d, want all 3 rows still stored", total)
+	}
+}
+
+// TestDoneSinceIsInclusive pins >= rather than >, so a row completed exactly on
+// the boundary stays visible.
+func TestDoneSinceIsInclusive(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	at := time.Unix(1_760_000_000, 0)
+
+	freezeClock(db, at)
+	added, err := db.Add(ctx, "boundary", globalScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := db.Complete(ctx, added.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	got, err := db.List(ctx, Filter{IncludeDone: true, DoneSince: at})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("a row completed exactly at the cutoff was hidden; the bound is exclusive")
+	}
+
+	// One second later it is out.
+	got, err = db.List(ctx, Filter{IncludeDone: true, DoneSince: at.Add(time.Second)})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("a row completed before the cutoff is still visible: %+v", got)
+	}
+}
+
+// TestDoneSinceZeroKeepsPreviousBehaviour — the field is additive, so call sites
+// written before it existed keep working unchanged.
+func TestDoneSinceZeroKeepsPreviousBehaviour(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	freezeClock(db, time.Unix(1_700_000_000, 0))
+
+	added, err := db.Add(ctx, "ancient history", globalScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := db.Complete(ctx, added.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	got, err := db.List(ctx, Filter{IncludeDone: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("with a zero DoneSince the row should be unbounded, got %d rows", len(got))
+	}
+}
+
+// TestDoneSinceIgnoredWhenDoneExcluded — with IncludeDone false there are no done
+// rows to bound, and the bound must not start filtering pending ones.
+func TestDoneSinceIgnoredWhenDoneExcluded(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	base := time.Unix(1_760_000_000, 0)
+	freezeClock(db, base)
+
+	if _, err := db.Add(ctx, "pending", globalScope); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	got, err := db.List(ctx, Filter{DoneSince: base.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("DoneSince filtered a pending row when IncludeDone was false, got %d rows", len(got))
+	}
+}
+
+// TestDoneSinceCombinesWithScopes guards the placeholder ordering: DoneSince's
+// argument is bound before the scope arguments, and a mismatch there would
+// silently compare the wrong values rather than error.
+func TestDoneSinceCombinesWithScopes(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	base := time.Unix(1_760_000_000, 0)
+	freezeClock(db, base)
+
+	mine, err := db.Add(ctx, "mine, done recently", sessionScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := db.Add(ctx, "other scope", dirScope); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := db.Complete(ctx, mine.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	got, err := db.List(ctx, Filter{
+		Scopes:      []task.Scope{sessionScope},
+		IncludeDone: true,
+		DoneSince:   base.Add(-DoneRetention),
+	})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != mine.ID {
+		t.Errorf("scope + DoneSince together returned %+v, want just the session task", got)
+	}
+}
+
+// TestDoneRetentionIsTheSingleDefinition — the 24h number lives here and nowhere
+// else, so `cli` and `tui` cannot drift from it.
+func TestDoneRetentionIsTheSingleDefinition(t *testing.T) {
+	if DoneRetention != 24*time.Hour {
+		t.Errorf("DoneRetention = %v, want 24h per docs/design.md", DoneRetention)
+	}
+}
+
+// TestCompleteIsReversible — space is a toggle, and it is the only undo the
+// product has until an undo stack lands.
+func TestCompleteIsReversible(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	freezeClock(db, time.Unix(1_760_000_000, 0))
+
+	added, err := db.Add(ctx, "toggle me", globalScope)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := db.Complete(ctx, added.ID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	done, err := db.Get(ctx, added.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !done.Done || done.DoneAt == nil {
+		t.Fatalf("after Complete: done=%v done_at=%v", done.Done, done.DoneAt)
+	}
+
+	if err := db.Uncomplete(ctx, added.ID); err != nil {
+		t.Fatalf("Uncomplete: %v", err)
+	}
+	back, err := db.Get(ctx, added.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if back.Done || back.DoneAt != nil {
+		t.Errorf("after Uncomplete: done=%v done_at=%v, want pending with no stamp", back.Done, back.DoneAt)
+	}
+}

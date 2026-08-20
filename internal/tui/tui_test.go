@@ -466,7 +466,7 @@ func TestUnhandledKeysDoNothing(t *testing.T) {
 
 	// Includes the keys the follow-on UI tasks will claim: until they land,
 	// pressing them must be a no-op rather than a surprise.
-	for _, key := range []string{"x", "Z", "9", "0", "a", "e", "d", "s", "g", " "} {
+	for _, key := range []string{"x", "Z", "9", "0", "a", "e", "d", "s", "g"} {
 		m, cmd := press(t, loaded, key)
 		if cmd != nil {
 			t.Errorf("key %q produced a command, want none", key)
@@ -577,12 +577,12 @@ func TestFooterOnlyAdvertisesImplementedKeys(t *testing.T) {
 	add(t, db, "something", globalScope)
 	footer := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}}).footer()
 
-	for _, want := range []string{"1/2/3", "q quit"} {
+	for _, want := range []string{"1/2/3", "space done", "q quit"} {
 		if !strings.Contains(footer, want) {
 			t.Errorf("footer %q missing %q", footer, want)
 		}
 	}
-	for _, unimplemented := range []string{"a add", "e edit", "space done", "d delete", "s re-scope", "g all"} {
+	for _, unimplemented := range []string{"a add", "e edit", "d delete", "s re-scope", "g all"} {
 		if strings.Contains(footer, unimplemented) {
 			t.Errorf("footer advertises the unimplemented %q: %s", unimplemented, footer)
 		}
@@ -606,7 +606,7 @@ func TestQueryFailureIsSurfaced(t *testing.T) {
 	if broken.err == nil {
 		t.Fatal("query against a closed database reported no error")
 	}
-	if view := broken.View(); !strings.Contains(view, "cannot read tasks") {
+	if view := broken.View(); !strings.Contains(view, "list tasks") {
 		t.Errorf("view hides the failure:\n%s", view)
 	}
 	if strings.Contains(broken.View(), "no tasks yet") {

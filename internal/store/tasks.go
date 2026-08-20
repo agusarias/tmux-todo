@@ -25,6 +25,12 @@ const listOrder = tierOrder + `, created_at DESC, id DESC`
 // groupedOrder keeps whole scopes together for the all-tasks view.
 const groupedOrder = tierOrder + `, scope_key, created_at DESC, id DESC`
 
+// DoneRetention is how long a completed task stays visible after it is
+// completed. It is the *view*'s retention, not the store's: nothing is ever
+// deleted on this schedule. Defined here so `cli` and `tui` share one number
+// rather than each spelling out 24h.
+const DoneRetention = 24 * time.Hour
+
 // Filter selects which tasks a query returns.
 //
 // An empty Scopes slice means every scope in the database, including scope keys
@@ -32,6 +38,11 @@ const groupedOrder = tierOrder + `, scope_key, created_at DESC, id DESC`
 type Filter struct {
 	Scopes      []task.Scope
 	IncludeDone bool
+	// DoneSince bounds *done* rows to those completed at or after it. Pending
+	// rows are never affected — their done_at is NULL, so a naive
+	// `done_at >= ?` would drop every one of them. The zero value applies no
+	// bound, which keeps the field additive for callers that predate it.
+	DoneSince time.Time
 }
 
 // Group is one scope's tasks, for the all-tasks view.
@@ -120,8 +131,14 @@ func (db *DB) Count(ctx context.Context, f Filter) (int, error) {
 	return n, nil
 }
 
-// Complete marks a task done, stamping done_at. Completing an already-done task
-// re-stamps it, which keeps the 24h purge window measured from the last action.
+// Complete marks a task done, stamping done_at.
+//
+// done_at is what the view's DoneSince bound reads, so it is the moment the row
+// starts ageing out of sight — never out of the database. Completing an
+// already-done task re-stamps it, which simply restarts that visibility window;
+// an earlier version of this comment described it as extending a *purge* window,
+// but nothing purges: completion is a toggle (see Uncomplete) and rows are kept
+// so history stays possible.
 func (db *DB) Complete(ctx context.Context, id int64) error {
 	return db.exec(ctx, "complete", id,
 		`UPDATE tasks SET done = 1, done_at = ? WHERE id = ?`, db.now().Unix(), id)
@@ -223,6 +240,11 @@ func (f Filter) where() (string, []any, error) {
 
 	if !f.IncludeDone {
 		conds = append(conds, `done = 0`)
+	} else if !f.DoneSince.IsZero() {
+		// Only done rows are bounded. Pending rows have a NULL done_at, which
+		// no comparison would satisfy, so they need the explicit escape hatch.
+		conds = append(conds, `(done = 0 OR done_at >= ?)`)
+		args = append(args, f.DoneSince.Unix())
 	}
 	if len(f.Scopes) > 0 {
 		ors := make([]string, 0, len(f.Scopes))
