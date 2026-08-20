@@ -1,7 +1,7 @@
 # Completed Task Lifecycle
 
 **Status:** review
-**Worktree:** /Users/agusarias/workspace/todo-completed-task-lifecycle
+**Worktree:** none (removed after merge)
 
 ## Goal
 `space` toggles completion on the cursor row. A row completed during this popup session
@@ -216,7 +216,10 @@ before any TUI code exists.
 
 ## Evidence
 
-Merge commit recorded below. Toolchain `go1.26.6 darwin/arm64`.
+**Merge commit:** `03eb37a` on local `main` (unpushed) — `git show 03eb37a`,
+`git log -1 -p 4e1ced1` for the implementation commit itself.
+
+Toolchain `go1.26.6 darwin/arm64`.
 
 ### Tests
 
