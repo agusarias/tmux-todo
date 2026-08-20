@@ -201,6 +201,22 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   inherits `$TMUX`, whose third field is the session the hook fired for, so `tdo` asks tmux
   itself and nothing is interpolated. That also fixes what the argument form could not — a
   name containing `:` cannot be used as a tmux target at all.
+  **The inheritance is real; "so tmux will answer for that session" was wrong, and it breaks the
+  hook.** tmux resolves "current session" from the *client*, and a `run-shell` child has none,
+  so it falls back to another session entirely — measured on 3.7b, a hook child whose `$TMUX`
+  ended in `,100` got `session_name=todo` / `session_id=$24` from an untargeted
+  `display-message -p`: an unrelated session. The same call **targeted** answers correctly
+  (`display-message -t "$100" -p '#{session_name}'`, the id built from `$TMUX`'s third field),
+  and interpolating *that* is safe where a name is not — `$TMUX` yields `$<number>`, never user
+  data. The failure is silent and exit 0: `session-renamed` compares the wrong session's name
+  against the map, sees no rename, does nothing. And it works when run by hand in a pane,
+  because a pane *has* a client — so a manual test of this command proves nothing about the
+  hook. Tracked in `docs/tasks/2026-08-20-session-renamed-hook-targets-wrong-session.md`.
+  **Corollary for probing this at all: tmux DOES expand `#{...}` in a `run-shell` argument
+  before `sh` sees it.** A canary running `display-message -p "…#{session_id}"` printed `00` —
+  the server expanded the format to `$100` inside the string and `sh` read that as `${1}00`. So
+  a canary meant to observe the *child's* view must contain no formats, or it silently reports
+  the server's view instead and reads as though the child agreed.
 - **`set-hook -g` replaces; `set-hook -ga` appends.** A plugin must append or it silently
   eats the user's own `session-renamed` hook. The cost is that re-running the install
   stacks duplicate copies (`show-hooks -g` shows `session-renamed[0]`, `[1]`, …); the hook
