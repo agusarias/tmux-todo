@@ -1,7 +1,7 @@
 # Task Create, Edit And Re-scope
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-task-create-edit-rescope
 
 ## Goal
 Mutation UX inside the popup: `a` opens an inline input row with `Tab` cycling the scope
