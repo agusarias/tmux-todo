@@ -120,3 +120,51 @@ func TestDoctorReportsBadPath(t *testing.T) {
 		t.Error("failure produced no stderr")
 	}
 }
+
+// TestTUIWiringSmoke covers runTUI's assembly — resolve the data dir, open the
+// store, resolve scopes, build the tui.Config — which had no test at all.
+//
+// It cannot get as far as a rendered popup: Bubble Tea needs a TTY and a test
+// process has none, so tui.Run fails at the last step. Everything before that
+// step is real, which is the part worth covering: a panic or a nil store would
+// surface here, and the "database is created" assertion proves the wiring ran
+// rather than bailing early.
+//
+// XDG_DATA_HOME is redirected first. Without it this test would open — and
+// create — the developer's real task database.
+func TestTUIWiringSmoke(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	code, _, stderr := run(t, "tui")
+
+	if code != 1 {
+		t.Errorf("exit code %d, want 1 (no TTY in a test process)", code)
+	}
+	if stderr == "" {
+		t.Error("the failure produced no stderr")
+	}
+	// The store was opened before the TUI was reached, so the wiring ran.
+	db := filepath.Join(dir, store.AppDir, store.DBName)
+	if _, err := os.Stat(db); err != nil {
+		t.Errorf("runTUI did not open a database at %s: %v", db, err)
+	}
+}
+
+// TestTUIReportsAnUnopenableDatabase — the error path around store.Open, which
+// is the one failure a user can actually hit (an unwritable data dir).
+func TestTUIReportsAnUnopenableDatabase(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(file, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("XDG_DATA_HOME", file)
+
+	code, _, stderr := run(t, "tui")
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "tdo:") {
+		t.Errorf("stderr does not name the failure: %q", stderr)
+	}
+}

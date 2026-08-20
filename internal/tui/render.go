@@ -243,7 +243,6 @@ func widestOf(ss []string) int {
 	return widest
 }
 
-// truncateLeft shortens s to at most width columns by dropping from the front,
 // textStyle picks the styling for a row's task text: done tasks are struck
 // through in place, so a completion stays legible and reversible where it
 // happened rather than moving or vanishing. Done beats selected — the strike is

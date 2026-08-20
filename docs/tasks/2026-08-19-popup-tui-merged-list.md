@@ -1,7 +1,7 @@
 # Popup TUI Merged List
 
-**Status:** in-progress
-**Worktree:** /Users/agusarias/workspace/todo-popup-fix
+**Status:** review
+**Worktree:** none (removed after merge)
 
 ## Goal
 The default popup view: session, dir and global tasks merged into one list with a per-row
@@ -483,4 +483,178 @@ func Resolve() (Resolved, error) { return Resolver{TmuxEnv: os.Getenv("TMUX")}.R
 
 That also wants a test which fails against the zero value — the present suite cannot catch
 this class of bug, since every case supplies `TmuxEnv` by hand.
+
+---
+
+## Evidence (fix-forward, 2026-08-20)
+
+Second execution, addressing the five items in **Plan delta for the fix-forward pass**. The
+original merge `a0155d9` stays on `main`; this is additive on top.
+
+### The defect, reproduced before the fix
+
+At 48x12 — `design.md:47`'s ~60%x60% on a standard 80x20 terminal — with the version
+stamped `f1590d3`, `tmux capture-pane` numbered by row:
+
+```
+     1	│  tdo                                         │      <- row 1 is the TITLE
+     2	│                                              │
+     3	│  ▸ ⌘ rebase onto main   (session: fx48)      │
+   ...
+    10	│  1/2/3 filter · j/k move · space done · q    │      <- footer wrapped
+    11	│  quit · vf1590d3                             │
+    12	╰──────────────────────────────────────────────╯
+```
+
+The footer occupied two rows, the frame came to 13 in a 12-row pane, and the terminal
+scrolled — so **the top border is gone**. Exactly the pitfall CLAUDE.md already records,
+reached through a line `chromeHeight` assumed was one row.
+
+### After
+
+Same size, same seed, 12 rows in a 12-row pane with both borders and a one-row footer:
+
+```
+     1	╭──────────────────────────────────────────────╮
+     2	│  tdo                                         │
+     3	│                                              │
+     4	│  ▸ · fix auth redirect  …0f4db/tmp/fx/repo)  │
+     5	│    · write migration                         │
+     6	│    ◉ call the dentist   (global)             │
+   ...
+    11	│  1/2/3 filter · j/k move · space done · q …  │
+    12	╰──────────────────────────────────────────────╯
+```
+
+And at 64x14 with a session-scoped row in play (14 rows in a 14-row pane, all three tiers):
+
+```
+     1	╭──────────────────────────────────────────────────────────────╮
+     2	│  tdo                                                         │
+     4	│  ▸ ⌘ rebase onto main   (session: fx48)                      │
+     5	│    ⌘ check CI                                                │
+     6	│    · fix auth redirect  ….claude/jobs/a9c0f4db/tmp/fx/repo)  │
+     8	│    ◉ call the dentist   (global)                             │
+    13	│  1/2/3 filter · j/k move · space done · q quit · vf1590d3-…  │
+    14	╰──────────────────────────────────────────────────────────────╯
+```
+
+The keybindings survive truncation and the version tail is what gets cut, which is the right
+way round for a hint line.
+
+### DoD 20 — the test that closes the class
+
+`TestFrameNeverExceedsThePane` is a table over 9 pane sizes x 3 `Version` stamps x 4 filter
+states (108 subtests), each asserting the frame's line count is <= the pane height and every
+line's display width is <= the pane width, with 40 rows seeded across all three tiers so the
+viewport is full.
+
+Restoring the shipped bug — the untruncated `footer()` — fails **56 subtests**:
+
+```
+--- FAIL: TestFrameNeverExceedsThePane/v=dev/40x10/filter=""
+--- FAIL: TestFrameNeverExceedsThePane/v=dev/44x12/filter=""
+    frame is 13 rows in a 12-row pane; the terminal will scroll and the top rows are lost
+```
+
+The test asserts on an **unclamped** frame, via a `frame()` method split out of `View()`.
+That distinction is load-bearing and I got it wrong first: with the assertion on `View()`'s
+output, the `clampHeight` backstop silently absorbed a deliberately miscounted
+`chromeHeight = 5` and the suite stayed green. Asserting on `frame()` — plus a check that
+the backstop did not fire — turns the same mutation into **216 failures**. A safety net that
+hides the bug it catches is worse than none.
+
+### The five plan-delta items
+
+| # | Item | Done |
+|---|---|---|
+| 1 | Truncate `footer()` and `titleLine()` to the content width, reusing `truncate`/`ellipsis` | yes — plus the single-line body states (error, empty, loading), which wrap for the same reason |
+| 2 | DoD 20 table test across widths and `Version` lengths | yes — 108 subtests, mutation-verified |
+| 3 | Decide `chromeHeight`: constant or computed | **stays constant**, and the comment now says why: every line it counts is one row *by construction* once truncated. The constant is what made the bug invisible, so the invariant it rests on is asserted by a test rather than trusted |
+| 4 | Fix `render.go`'s `textStyle` godoc | yes — a dangling first line of `truncateLeft`'s comment, left by the dedup splice in the first pass |
+| 5 | Re-run DoD 18 sweep and captures at 48x12 and 64x14 | yes — both above |
+
+Two supporting changes beyond the letter of the delta: `listWidth()` became `contentWidth()`
+because chrome lines need the same budget and the old name said otherwise, and `clampHeight`
+was added as a backstop. The backstop should never fire — the truncation is the mechanism —
+but the failure it guards is asymmetric: an over-tall frame costs the rows at the **top**
+(border, session tier, labels), while clipping our own bottom row costs the bottom border.
+
+### Non-blocking items from the audit
+
+**`internal/cli`'s `runTUI` had zero coverage.** Added two tests. `TestTUIWiringSmoke`
+redirects `$XDG_DATA_HOME` to a temp dir (without which the test would create the
+developer's real database), runs `tdo tui`, and asserts it exits 1 — a test process has no
+TTY, so Bubble Tea fails at the last step — while the database file *was* created, proving
+the resolve/open/Config assembly ran. Made to fail by bailing out of `runTUI` early:
+
+```
+--- FAIL: TestTUIWiringSmoke
+    runTUI did not open a database at .../tmux-todo/tasks.db: no such file or directory
+```
+
+`TestTUIReportsAnUnopenableDatabase` covers the one failure a user can actually hit.
+
+**The dependency bump, now remarked as asked.** `bubbles v1.0.0` was the only direct
+addition; it pulled three new indirect modules and upgraded five:
+
+```
++ github.com/clipperhouse/displaywidth v0.9.0
++ github.com/clipperhouse/stringish   v0.1.1
++ github.com/clipperhouse/uax29/v2    v2.5.0
+  charmbracelet/x/ansi     0.10.1 -> 0.11.6
+  charmbracelet/x/cellbuf  0.0.13 -> 0.0.15
+  charmbracelet/x/term     0.2.1  -> 0.2.2
+  charmbracelet/colorprofile ... -> 0.4.1
+  lucasb-eyer/go-colorful  1.2.0  -> 1.3.0
+  mattn/go-runewidth       0.0.16 -> 0.0.19
+```
+
+`clipperhouse/displaywidth` now backs `lipgloss.Width`, which is the primitive the accepted
+ambiguous-width risk rests on — so the risk was accepted against a different implementation
+than the one in the tree. Measured under the current one:
+
+| glyph | | `lipgloss.Width` |
+|---|---|---|
+| `⌘` U+2318 (session) | ambiguous | 1 |
+| `·` U+00B7 (dir) | ambiguous | 1 |
+| `◉` U+25C9 (global) | ambiguous | 1 |
+| `▸` U+25B8 (cursor) | ambiguous | 1 |
+| `…` U+2026 (ellipsis) | ambiguous | 1 |
+
+All still 1, so the layout arithmetic is unchanged and the accepted risk stands exactly as
+recorded — it is about what a *terminal* configured `ambiguous-width=double` does, not about
+what this library computes. DoD 20's width assertions now exercise the primitive on every
+size in the table.
+
+**The blocking finding from the first pass is resolved** and is history: `scope-resolution`
+merged its fix as `d69dd4d` and is `done`; the 64x14 capture above shows a session-scoped row
+with its tier label.
+
+### Suite
+
+```
+$ make test
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.591s
+ok  	github.com/agusarias/tmux-todo/internal/scope	1.207s
+ok  	github.com/agusarias/tmux-todo/internal/store	0.401s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.380s
+ok  	github.com/agusarias/tmux-todo/internal/tui	1.137s
+```
+
+`go vet ./...` silent, `gofmt -l .` empty, `CGO_ENABLED=0 make build` links no libsqlite3
+(`libSystem`, `libresolv` only). `internal/tui` + `internal/cli` now run 170 passing tests
+and subtests.
+
+### Not verified
+
+- **Ambiguous-width terminals**, still. The captures ran in a normal-width terminal; the
+  measurement above shows the library treats the glyphs as one column, which is the
+  assumption the layout makes, but a terminal set to `ambiguous-width=double` would still
+  shift the columns. Unchanged accepted risk, now with a harness that could check it.
+- **The `display-popup` overlay**, which needs an attached client (CLAUDE.md). Every capture
+  above is a plain tmux pane.
+- The frame invariant is asserted from 40 columns up. Below that the box's own border and
+  padding (6 columns) dominate and the popup is not usable at any content; `contentWidth`
+  floors at 1 rather than going negative.
 
