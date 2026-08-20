@@ -1,7 +1,7 @@
 # Popup TUI Merged List
 
 **Status:** review
-**Worktree:** /Users/agusarias/workspace/todo-popup-tui-merged-list
+**Worktree:** none (removed after merge)
 
 ## Goal
 The default popup view: session, dir and global tasks merged into one list with a per-row
@@ -231,6 +231,9 @@ rather than a concession.
   budgeted at ~8ms against ~100ms; step 7 measures rather than assumes.
 
 ## Evidence
+
+**Merge commit:** `a0155d9` on local `main` (unpushed) — `git show a0155d9`,
+`git log -1 -p 816b027` for the implementation commit itself.
 
 Toolchain: `go1.26.6 darwin/arm64` from `/opt/homebrew/bin/go`.
 
