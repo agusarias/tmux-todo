@@ -230,11 +230,115 @@ and re-home uses per-task `Rescope` rather than its `RenameSession`.
 `task-create-edit-rescope`'s modes, delete queue, `u`, availability cycle and `?` overlay.
 Both briefs share the `2026-08-19` date prefix and the executor claims the oldest `ready`
 task, which would sort `all-tasks-view…` **first** alphabetically — exactly the wrong order.
-Holding this at `agreed` is the curator's lever to prevent that. Flip to `ready` once
-`task-create-edit-rescope` is `done`.
+Holding this at `agreed` is the curator's lever to prevent that.
+
+**Gate status:** `task-create-edit-rescope` reached `review` on 2026-08-20 (merge `dc5e73c`)
+while this brief was being planned, so the dependency is built and merged into local `main`.
+Flip this brief to `ready` as soon as that Checkpoint 2 is approved. The plan below was
+written against the merged code, not against the plan for it.
 
 ## Plan
-(Added at Checkpoint 1.)
+`internal/tui` plus a new jump executor in `internal/cli`. No `internal/store` change, no
+migration, no new module dependency.
+
+**The one structural change: a shared row model.** The merged view's cursor is an index into
+`[]task.Task`. The all-tasks view's list is *heterogeneous* — group headers interleaved with
+task rows, headers not selectable — so that model does not stretch. Both views become:
+
+```go
+type rowKind int
+const (rowTask rowKind = iota; rowHeader; rowInput)
+
+type row struct {
+    kind  rowKind
+    task  task.Task    // rowTask
+    group store.Group  // rowHeader: scope + liveness
+}
+```
+
+`m.rows []row` with the cursor indexing into it and `moveCursor` skipping non-selectable
+kinds. The merged view is then the degenerate case where every row is a `rowTask`, and
+`anchorCursor`, the viewport scroll math and the input row all have exactly one
+implementation instead of two. This is the riskiest part of the task precisely because it
+edits code that already works, so it goes first and its guard is stated below.
+
+**The jump leaves as a value, not a subprocess.** `Run` grows a result:
+
+```go
+// Jump is what internal/cli should do after the popup closes.
+// The zero value means "no jump".
+type Jump struct {
+    Session string
+    Live    bool
+}
+func Run(cfg Config) (Jump, error)
+```
+
+`internal/tui` still imports no `os/exec`. `internal/cli` owns the invocation table, behind an
+injected runner so every branch is testable without tmux or sesh:
+
+| context | live | command |
+|---|---|---|
+| inside tmux (`$TMUX` set) | yes | `tmux switch-client -t <name>` |
+| inside tmux | no | `sesh connect -s <name>`, else `tmux new-session -d -s <name>` + `switch-client -t <name>` |
+| outside tmux | either | `tmux attach -t <name>`, creating it first if absent |
+
+The outside-tmux row is a `how` detail the grill did not cover: `switch-client` and
+`sesh connect -s` both need an attached client, and `tdo tui` can be run from a plain shell.
+`internal/cli` already knows whether it is inside tmux (it holds the `scope.Resolver`), so it
+picks attach-vs-switch and `internal/tui` stays ignorant of the distinction.
+
+**Files.**
+- `internal/tui/rows.go` — new. The `row` model, the flatten functions for both views, and
+  cursor movement over selectable rows.
+- `internal/tui/alltasks.go` — new. `g`, the `ListGrouped` query, group headers with the
+  liveness label and the right-aligned jump hint, `r`, and group delete.
+- `internal/tui/tui.go` — `viewKind` dispatch (the seam is already there, with a comment naming this task),
+  `Config.LiveSessions`, per-view cursor memory, `Run`'s new signature.
+- `internal/tui/render.go` — `renderHeader`, and a width budget for the header that guarantees
+  the jump hint its columns the way `columns()` already does for tier labels.
+- `internal/cli/jump.go` — new. The invocation table above, the injected runner, and the
+  `sesh`-absent fallback. This is where `os/exec` lives.
+- `internal/cli/cli.go` — resolve `LiveSessions` once via `tmux list-sessions`, pass it in,
+  and act on the returned `Jump`.
+
+**Sequencing.**
+1. **The row-model refactor, with the merged view's existing tests as the guard.** Land
+   `[]row` and make every current `internal/tui` test pass **without editing a single one of
+   them**. If a merged-view test needs changing, the refactor changed behaviour and is wrong.
+   That constraint is the whole safety argument for touching working code.
+2. **`g` and the all-tasks view, read-only**: `ListGrouped` with nil `Scopes` and the merged
+   view's `DoneSince`, headers, liveness from `Config`, non-selectable headers, the header
+   jump hint, and the width tests. No mutation, no jump — the view is provable on its own.
+3. **The jump.** `Run`'s `Jump` result, `internal/cli/jump.go` and its table, the argv test
+   for metacharacters, the sesh-failure fallback, and deletes-commit-before-jump.
+4. **`r` re-home and group delete**: bulk `Rescope`, the group push onto the delete queue,
+   and the empty-group-disappears case.
+5. **`a` into the cursor's group** and the per-view `?` overlay.
+6. `design.md:107-120`, `capture-pane` evidence, the real-tmux jump on a private socket
+   (`tmux -L`, reusing the probe harness recorded in Decisions), then the full sweep.
+
+**What could go wrong.**
+- *The row refactor silently regresses the merged view.* The mitigation is the rule in step 1:
+  existing tests pass unedited. If that rule has to be broken, stop and treat it as a scope
+  event rather than "fixing" the test.
+- *A long session name collides with the right-aligned header hint.* This is precisely the
+  class that made tier labels vanish for real dir keys — "a row wider than the viewport is
+  silently clipped, not wrapped" (CLAUDE.md). The header needs a real width budget, and the
+  hint must win its columns while the *name* left-truncates, because a session name's tail is
+  what identifies it. Extend `TestRowsNeverExceedTheirWidth` to headers.
+- *A group whose every task is queued for deletion leaves an empty header behind.* Filter the
+  queued ids out of each group's `Tasks` **and then drop groups that came out empty** — two
+  steps, and skipping the second is the plausible bug (DoD 16).
+- *`ListGrouped` with a nil `Scopes` also returns done rows.* It must be passed the same
+  `DoneSince` the merged view computes, or the wide view becomes a graveyard while the
+  merged view stays clean — and the inconsistency would look like a store bug.
+- *`Run`'s signature churns twice.* `task-create-edit-rescope` has just made it return a
+  commit error; this makes it `(Jump, error)`. Accepted: one caller, and the alternative is
+  smuggling the jump out through a pointer field.
+- *A detached-but-running session reads `(live)` and `switch-client` then has no client.*
+  Covered by the invocation table's outside-tmux row; called out because `tmux list-sessions`
+  reporting a session says nothing about whether *this* process has a client.
 
 ## Evidence
 (Added by the executor.)
