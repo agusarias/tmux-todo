@@ -1,7 +1,7 @@
 # SQLite Store And Migrations
 
-**Status:** review
-**Worktree:** /Users/agusarias/workspace/todo-sqlite-store
+**Status:** ready
+**Worktree:** none
 
 ## Goal
 Implement the SQLite store at `~/.local/share/tmux-todo/tasks.db` with the v1 `tasks`
@@ -62,6 +62,12 @@ side effects, no network.
     still yields a binary with no libsqlite3 in `otool -L`.
 11. `tdo doctor` reports the migrated schema version (1, not 0) and still exits 0.
 12. Tests use real SQLite files under `t.TempDir()` — no mocks over the driver.
+13. **Concurrent *first* open is safe** (added at Checkpoint 2, 2026-08-20). Two processes
+    opening the same brand-new database must both succeed: neither `SQLITE_BUSY` from the
+    `schema_version` inspection nor `table tasks already exists` from a doubly-applied
+    migration. Proven by a test that runs the real migration path from N concurrent
+    goroutines against one fresh file, and by the two-process binary check in Verification.
+    DoD 9 does not cover this — it exercises a database that is already migrated.
 
 ## Verification
 - `go test ./...` with the store package's own output shown, including the idempotent-reopen
@@ -71,6 +77,10 @@ side effects, no network.
 - `bin/tdo doctor` output showing `schema 1`.
 - A deliberate failing-migration test proving rollback: version stays at the prior value and
   the partial DDL is absent.
+- **Concurrent first open (DoD 13):** 25 iterations of two `tdo doctor` processes racing on
+  one fresh `XDG_DATA_HOME`, plus a 3-way run, all exiting 0. The curator's reproduction
+  command and its before-numbers are in the Checkpoint 2 decision below; re-run it and paste
+  the after-numbers.
 
 ## Decisions
 - **2026-08-19 (grill):** This task ships the **full CRUD API**, not just schema and
@@ -131,6 +141,38 @@ side effects, no network.
   overflow is the driver-behaviour pitfalls (DSN pragmas, partial multi-statement Exec, WAL
   sidecars) — each cost real debugging time here and would cost it again. Flagging rather
   than silently trimming; the curator may cut it.
+- **2026-08-20 (Checkpoint 2, fix forward):** The merge `fda2791` was audited and kept on
+  `main` — schema, runner, CRUD and evidence all held up — but it was bounced back to
+  `ready` for one defect the DoD did not cover: **concurrent first open fails**. Two
+  `tdo doctor` processes against one fresh `XDG_DATA_HOME` failed **11 of 25** runs with
+  `inspect schema_version: database is locked (5) (SQLITE_BUSY)`, and a 3-way run also hit
+  `migration 001_init: SQL logic error: table tasks already exists (1)`. The same test
+  against an already-migrated database failed **0 of 25**, so the window is strictly first
+  creation — the first popup after install, and the first opens after any release that adds
+  `002_*.sql`. Reverting was rejected: the implementation is otherwise sound and the fix is
+  small. Reproduce with:
+
+  ```sh
+  for i in $(seq 1 25); do rm -rf /tmp/race$i
+    XDG_DATA_HOME=/tmp/race$i ./bin/tdo doctor >/dev/null 2>&1 & p1=$!
+    XDG_DATA_HOME=/tmp/race$i ./bin/tdo doctor >/dev/null 2>&1 & p2=$!
+    wait $p1; r1=$?; wait $p2; r2=$?
+    [ $r1 -ne 0 ] || [ $r2 -ne 0 ] && echo "run $i: $r1/$r2"
+  done
+  ```
+
+  Two independent causes, both in `migrate.go`/`store.go`; the fix is the executor's call,
+  but the diagnosis is: (1) `applyMigrations` reads the current version *outside* the
+  transaction, so both processes decide to apply 001 and the loser's DDL collides — the
+  version read and the apply loop want to be in one `BEGIN IMMEDIATE` transaction, with the
+  version re-checked inside it so the loser sees it already current and skips; (2) the DSN
+  sets `journal_mode` before `busy_timeout`, so the lock wait is not yet in force while the
+  database is being created — hence `SQLITE_BUSY` rather than a 5s wait. Ordering
+  `busy_timeout` first is the suspected fix, to be confirmed by the DoD 13 test.
+- **2026-08-20 (Checkpoint 2):** Everything else in the merge was accepted as-is,
+  explicitly including the two extra CHECK constraints in `001_init.sql` (global tasks
+  carry no scope key; `done` and `done_at` agree). They are consistency guards over the
+  design's v1 column set, not new fields, so they do not contradict docs/design.md.
 
 ## Plan
 Approved at Checkpoint 1, 2026-08-19.
@@ -174,6 +216,13 @@ current shape — this widens the package, it does not restructure it.
   any later backup or sync work. Note it in CLAUDE.md.
 - A `CASE`-based tier ordering is easy to get subtly wrong (dir sorting before session). The
   ordering test pins all three tiers explicitly.
+
+**Revision after Checkpoint 2 (2026-08-20).** Step 9: make concurrent first open safe per
+DoD 13 — one `BEGIN IMMEDIATE` transaction around the version read and the apply loop, and
+`busy_timeout` ahead of `journal_mode` on the DSN. Add the N-goroutine fresh-file test
+alongside the existing two-handle test, and re-run the two-process binary check. The
+existing `## Evidence` section below is the *previous* pass's and must be replaced, not
+appended to, so the numbers in it are never mistaken for the fixed build's.
 
 **Out of scope:** scope resolution, any TUI work, any CLI command beyond the `doctor`
 version line, and the 24h purge *policy* — `PurgeDone` takes an explicit cutoff and the
