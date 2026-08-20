@@ -1,6 +1,6 @@
 # Completed Task Lifecycle
 
-**Status:** review
+**Status:** done
 **Worktree:** none (removed after merge)
 
 ## Goal
@@ -139,6 +139,73 @@ the strike-through was seen.
 - **2026-08-20 (curator, Checkpoint 1 APPROVED):** Plan signed off as written, including the
   near-dead 24h arm (kept to match `design.md`'s "whichever comes first", and DoD 3 must test
   it explicitly or it will never execute). Status `ready`.
+
+## Close-out
+
+### 2026-08-20 — Checkpoint 2 APPROVED (curator)
+
+Merge `03eb37a` stands on local `main`, unpushed. Every Evidence claim re-verified
+independently before approval, not taken on trust:
+
+- `make test` green across all five packages, `go vet ./...` silent, `gofmt -l .` empty,
+  `CGO_ENABLED=0 make build` linking only `libSystem` + `libresolv` (toolchain
+  `go1.26.6 darwin/arm64`).
+- All 15 guards this task adds pass on a clean `-count=1` run.
+- The three claims a self-report can most easily get wrong, each checked by grep:
+  the only `time.Now()` in `internal/tui` is `tui.go:85`'s `Config.now()` fallback;
+  `DoneRetention` is defined once at `internal/store/tasks.go:32` with every other hit
+  merely reading it; `PurgeDone` has no caller outside its own test.
+
+**Definition of done — all 13 met**, with one item qualified rather than waved through:
+
+- **DoD 6 is met by a different test than the one it names.** The DoD's wording
+  ("complete a mid-list row, assert the cursor still points at that task") is
+  **vacuous**: completing a row does not reorder the list, so the cursor's index lands
+  on the same task whether or not `anchorCursor`'s id lookup exists — the test passes
+  with the implementation deleted. The guard that actually discriminates is
+  `TestCursorReAnchorsWhenRowsShift`, where another pane inserting rows shifts every
+  index. Both tests remain in the tree; **`TestCursorReAnchorsWhenRowsShift` is the one
+  that protects the behaviour**, and any future change to id-anchoring should be judged
+  against it, not the DoD-worded one. The executor surfaced this itself with the failing
+  mutation to prove it — the right call, and the reason it is recorded here rather than
+  quietly counted as clean. Generalised into CLAUDE.md as a repo-wide verification rule.
+- **DoD 4's revision of `popup-tui-merged-list`'s "the TUI holds no clock" note stands
+  as approved.** An injected `Config.Now` preserves that note's intent: the model is
+  still a pure function of its inputs.
+
+**Beyond the brief:** Verification declared real-terminal strike-through unprovable. It
+was proved anyway — `store.DefaultPath` honours `$XDG_DATA_HOME`, so a seeded throwaway
+database yields a reproducible `capture-pane` without a `--db` flag. The capture shows
+the two-day-old done row absent on open but still in the database, the toggled row
+holding its position, `done_at` cleared on undo, and exactly one row carrying `ESC[2;9m`.
+That closes a stated verification gap instead of accepting it.
+
+**Known regression, deliberately not fixed here — accepted, and since resolved:** adding
+`space done` widened the footer, pushing the minimum popup width to 58 (`dev`) / 62
+(`ec132f9`) / 78 (`-dirty`) columns, all above `design.md:47`'s ~48-column popup on an
+80x20 terminal. The executor deferred the fix to `popup-tui-merged-list`'s DoD 20 rather
+than absorbing another task's scope, which was the right call and is why this task was
+approved with the regression open.
+
+**It did not stay open.** `popup-tui-merged-list`'s fix-forward pass landed as `e831b42`
+minutes after this task's `03eb37a`, truncating `footer()` and `titleLine()` to the
+content width and adding `TestFrameNeverExceedsThePane` — 108 subtests over pane sizes x
+version stamps x filter states. So the wider footer this task introduced is now covered by
+an invariant that fails 56 subtests if the truncation is removed, which is a stronger
+outcome than fixing it here would have been: the *class* is closed, not just the instance.
+No user was ever exposed — the `display-popup` keybind lives in
+`tmux-integration-and-rename-hook`, which does not exist yet.
+
+**CLAUDE.md:** one cross-cutting entry added — *"A DoD can specify a vacuous test"* —
+sitting with the existing pitfalls about tests that cannot fail. Per DoD 13, no
+per-package detail was added; that lives in the doc comments on `Filter.DoneSince`,
+`Complete`, and `Config.Now`.
+
+**Still open, by design:** `store.PurgeDone` keeps no caller (Constraints); whether done
+rows appear in the `g` all-tasks view is left to `all-tasks-view-with-sesh-jump`'s grill.
+
+**Worktree:** already removed by the executor before this checkpoint. `main` is unpushed —
+pushing remains the user's call.
 
 ## Decisions (execution)
 - **2026-08-20 (executor):** The toggle write and the re-query are **one** `tea.Cmd`, not a

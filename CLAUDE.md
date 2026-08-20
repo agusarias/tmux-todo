@@ -90,6 +90,15 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   guard passes against the very bug it was written for on any tmux-less CI runner.
   Fake the environment (`t.Setenv("TMUX", "/tmp/fake,1,0")`) so the assertion has
   something to be wrong about; keep the live-tmux test as a separate, skippable leg.
+- **A DoD can specify a vacuous test.** `completed-task-lifecycle` DoD 6 asked for
+  "complete a mid-list row, assert the cursor still points at that task" — which
+  passes with the id-anchoring code deleted, because completing a row does not
+  reorder the list, so the index lands on the same task anyway. The guard that
+  discriminates is `TestCursorReAnchorsWhenRowsShift`: another pane inserting rows
+  shifts every index. Delete the implementation and re-run before believing a test
+  covers what its name claims; a green test whose subject is gone is evidence of
+  nothing. Both tests stayed in the tree, and the close-out records which one is the
+  real guard.
 - **A multi-statement `Exec` applies statements up to the first failure** and
   leaves them there — hence the transaction around each migration. That per-file
   unit is a `SAVEPOINT` *inside* the one outer `BEGIN IMMEDIATE`, so a failed
