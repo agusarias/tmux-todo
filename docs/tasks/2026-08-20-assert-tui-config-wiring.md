@@ -1,7 +1,7 @@
 # Assert What `tui.Config` Is Actually Wired With
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-assert-tui-config-wiring
 
 ## Goal
 `internal/cli`'s TUI wiring test must assert the **contents** of the `tui.Config` it builds,
