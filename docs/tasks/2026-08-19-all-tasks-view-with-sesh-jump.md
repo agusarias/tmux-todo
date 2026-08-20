@@ -579,4 +579,4 @@ Branch `all-tasks-view`, commit `2978ae0`, merged into local `main` with `--no-f
 worktree removed. Not pushed — that stays the user's call via the curator. The merge commit
 hash is recorded in the line below, added on `main` after the merge.
 
-Merge commit: `<recorded below>`
+Merge commit: `4abf551` (`git log -1 -p 4abf551` for the diff; the worktree is gone).
