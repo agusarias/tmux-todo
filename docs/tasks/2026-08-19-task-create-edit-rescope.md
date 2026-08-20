@@ -1,7 +1,7 @@
 # Task Create, Edit And Re-scope
 
-**Status:** in-progress
-**Worktree:** ../todo-task-create-edit-rescope
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 Mutation UX inside the popup: `a` opens an inline input row with `Tab` cycling the scope
@@ -345,6 +345,11 @@ the file is small enough to reason about.
   and CLAUDE.md's three shipped bugs say it gets its own careful pass, not a `+1`.
 
 ## Evidence
+
+**Merged into local `main` as `dc5e73c`** (implementation commit `de7dd7b`; the worktree
+`../todo-task-create-edit-rescope` has been removed, so read the diff with
+`git show de7dd7b` or `git log -1 -p dc5e73c`). Not pushed. `make test`, `make lint` and
+`make build` were re-run on `main` after the merge and are green there too.
 
 From the worktree `../todo-task-create-edit-rescope`, go1.26.6, tmux 3.7b, macOS arm64.
 
