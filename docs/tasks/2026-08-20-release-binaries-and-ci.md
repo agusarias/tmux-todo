@@ -1,7 +1,7 @@
 # Release Binaries And CI
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-release-binaries-and-ci
 
 ## Goal
 Give the project real release infrastructure: semantic version tags, a CI workflow that runs
