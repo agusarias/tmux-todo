@@ -275,6 +275,16 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   makes it evidence that the *contract* is implemented. A golden captured from
   `tdo list --json` would have pinned any bug just as firmly and passed just as
   green — it proves only that the code agrees with itself.
+- **The `tui.Config` the popup gets is only valid *during* `runTUIProgram`.** `runTUI` defers
+  `closeDB`, so a test that captures the Config through the seam and then asserts on it after
+  `Run` returns is holding a closed handle — `cfg.DB.Count` answers `sql: database is closed`.
+  Anything that has to touch the store (as opposed to comparing `DB.Path()`) belongs inside
+  the substituted program, which is the only moment the popup itself would have had it.
+  `internal/cli/wiring_test.go` probes there and keeps the result on its fixture.
+- **`t.Helper()` in a table of assertion closures hides which assertion fired.** The whole
+  table reports at the dispatch line. `wiringChecks` leaves it off deliberately — each entry
+  runs in its own subtest, so the field name is already in the test name and the line number
+  is worth more than the tidy stack.
 - **A `go test` process is *not* TTY-less inside tmux, and that hung `make test` for
   months of commits.** Bubble Tea opens `/dev/tty` directly, so redirecting a test's stdout
   hides nothing from it: `tui.Run` really renders the popup into the developer's pane and
