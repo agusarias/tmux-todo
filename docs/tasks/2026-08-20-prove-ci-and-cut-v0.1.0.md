@@ -1,6 +1,6 @@
 # Prove CI And Cut v0.1.0
 
-**Status:** draft
+**Status:** agreed
 **Worktree:** none
 
 ## Goal
@@ -21,8 +21,13 @@ why it is not a side effect of writing a YAML file.
 
 ## Constraints
 - Depends on `release-binaries-and-ci` being `done`. If it is not, set `blocked`.
-- **The push itself is the user's action**, not the executor's. This brief's first step is a
-  human one; the executor's work begins once `main` is on the remote and CI has run.
+- **This is a curator-run task and must never be set `ready`.** Ruled at Checkpoint 1,
+  2026-08-20. Every DoD item here is a push, a tag or a publish, and all three are forbidden
+  to the executor — so an executor claiming this brief could do nothing but immediately
+  `blocked`. taskflow already puts a remote push with "the user's call, via the curator", so
+  this is the framework's own shape rather than an exception to it. The curator proposes each
+  publish action in an interactive pass, the user approves it, the curator runs it and records
+  the result. **If you are an executor reading this: do not claim this task.**
 - The throwaway pre-release tag and its release must be deleted — locally **and** remotely —
   before `v0.1.0` is cut, or every subsequent `git describe` derives a version from a test tag.
 - No change to the `--json` contract, the scope-key rules, or the CLI surface. Cutting `0.1.0`
@@ -73,7 +78,68 @@ disagree permanently.
   green CI run it could not have observed — every item requiring a remote moved here.
 
 ## Plan
-(Added at Checkpoint 1.)
+**Approved at Checkpoint 1 on 2026-08-20.** Curator-run, approval per step, status stays
+`agreed`. The user also ruled that `docs/tasks/` publishes as-is — the rationale trail is an
+asset for an open-source plugin, not a liability.
+
+**Preconditions, established at Checkpoint 1 so they are not discovered mid-task.**
+- `gh` 
+ is installed and authenticated as `agusarias`; git protocol **ssh**; token scopes
+  `gist, read:org, repo`. `repo` covers creating a release.
+- **`workflow` scope is absent.** That scope gates pushing `.github/workflows/*` over **HTTPS**
+  with a token; pushes here go over SSH, where the key governs and the gate does not apply. If
+  a push of the workflow files is ever rejected for scope, that is the cause and the fix is
+  either an SSH remote (already the case) or adding the scope — **not** deleting the workflow.
+- `origin/main` is at `bf9fed1` (the `cli-surface` review commit), so the repo already exists
+  publicly and this push is ~47 commits, not a first publication.
+- **No tags exist on the remote**, confirming `git describe` has never had one to describe.
+
+**Step order, each one a propose/approve/run cycle.**
+
+1. **Push `main`.** Nothing irreversible in itself — the branch already exists publicly — but
+   it is what makes ~47 commits and the whole `docs/tasks/` trail visible. Report the range
+   pushed.
+2. **Watch CI's first real run.** `gh run watch` / `gh run view`. Record the URL. If it fails,
+   that is not a setback: a first CI run on a repo that has never had one is expected to
+   surface something, and fixing it is part of this task rather than a scope event.
+3. **Prove the tmux-less assertion fires** (DoD 2). Deliberately add tmux to the `go` job on a
+   throwaway branch and confirm that job **fails**. This is the item most likely to be skipped
+   as "obviously fine", and it is the whole reason
+   `tmux-regression-guard-ci-proof` existed — an assertion nobody has watched fail is an
+   assertion nobody has tested. Delete the branch after.
+4. **Prove the release workflow on a throwaway pre-release tag** (`v0.0.1-test`). Four assets
+   plus `checksums.txt`, one asset downloaded and its `--version` shown to equal the tag.
+5. **Delete the throwaway tag and its release, locally and remotely**, and confirm with
+   `git describe --tags` that nothing references it. Doing this *before* step 6 is not
+   cosmetic: a lingering `v0.0.1-test` would make every subsequent `git describe` derive from
+   it, so every build would stamp a version derived from a test tag.
+6. **Cut `v0.1.0`** — annotated tag, pushed, release published. Then `make build` and show
+   `./bin/tdo --version` reporting a real version for the first time in the project's history.
+7. **Verify install-by-download** (DoD 7): a container or clean environment with no `go` on
+   `PATH`, a TPM-style clone, reaching a working `prefix + t` purely from the release asset.
+   This is the user this whole release exists for, and it is the only step that proves the
+   parent task's download path against a real GitHub asset rather than a fixture.
+8. **Walk the README's install instructions verbatim** (DoD 8) and fix anything that does not
+   work as written.
+
+**What could go wrong.**
+- *Step 3 being skipped.* It is the one step with no user-visible payoff, and it is the one
+  guarding against the exact vacuity this project has hit four times. Do it before the tag,
+  while there is still appetite for it.
+- *The throwaway tag surviving.* Covered by step 5, called out again because `git describe`
+  failures are silent and permanent-feeling: every build stamps the wrong thing and nobody
+  notices until a release.
+- *`v0.1.0` cut while the hook bug is open.* `session-renamed-hook-targets-wrong-session` is
+  `ready` and unfixed — the rename hook silently does nothing. Cutting a release with a
+  headline feature known-broken is a judgment call, not a technicality: either the fix lands
+  first, or the release notes say plainly that rename-following does not work yet and re-home
+  from the all-tasks view is the workaround. **Raise this with the user at step 6 rather than
+  deciding it here** — it is a product call about what `0.1.0` claims.
+- *CI cost and flakiness on the macOS runner.* If it is a nuisance, reduce what runs there and
+  say so; do not retry until green.
+- *Doing steps 1-2 before the parent task merges.* There are no workflow files yet:
+  `release-binaries-and-ci` is `in-progress`. Step 1 can happen any time; step 2 cannot happen
+  until the workflows exist on `main`.
 
 ## Evidence
 (Added by the executor.)
