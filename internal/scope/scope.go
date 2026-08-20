@@ -225,3 +225,37 @@ func (rs Resolved) Has(kind task.ScopeKind) bool {
 	_, err := rs.Lookup(kind)
 	return err == nil
 }
+
+// LiveSessions is the set of tmux session names running right now.
+//
+// It is the all-tasks view's liveness label, resolved once per popup rather than
+// per keypress: a subprocess on a keypress inside the popup would put ~5ms and a
+// failure mode on the hot path, and the label is only ever used to pick which
+// jump command to run — a stale one costs nothing, because a "not running"
+// session that turns out to be running is switched to anyway.
+//
+// It deliberately does *not* short circuit on TmuxEnv the way queryTmux does.
+// `tdo tui` can be run from a plain shell with a tmux server up, and in that
+// context the sessions are still there to jump to; asking is what makes the
+// outside-tmux jump possible at all. tmux being absent, or no server running, is
+// not an error here — there is simply nothing live, which is the honest answer.
+//
+// The names are keys, not display strings: no trimming beyond the line split,
+// no case folding. A session name can contain spaces, which is exactly why the
+// format is one name per line rather than a separated list.
+func (r Resolver) LiveSessions() map[string]bool {
+	out, err := r.run("tmux", "list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return nil
+	}
+	live := map[string]bool{}
+	for _, line := range strings.Split(strings.ReplaceAll(string(out), "\r\n", "\n"), "\n") {
+		if line != "" {
+			live[line] = true
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	return live
+}

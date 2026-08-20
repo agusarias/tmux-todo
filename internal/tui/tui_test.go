@@ -500,10 +500,11 @@ func TestUnhandledKeysDoNothing(t *testing.T) {
 	loaded := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}})
 	loaded = pressAndSettle(t, loaded, "j")
 
-	// Includes the keys the follow-on UI tasks will claim (g, for the all-tasks
-	// view): until they land, pressing them must be a no-op rather than a
-	// surprise. a/e/d/s/u/? are bound by this task and are covered elsewhere.
-	for _, key := range []string{"x", "Z", "9", "0", "g"} {
+	// `g` used to be here as a key a follow-on task would claim; the all-tasks
+	// view has now claimed it, and its own tests cover it. What is here instead
+	// are that view's keys, which must stay inert in the *merged* view: enter
+	// has nowhere to jump, and r and D need a group.
+	for _, key := range []string{"x", "Z", "9", "0", "enter", "r", "D"} {
 		m, cmd := press(t, loaded, key)
 		if cmd != nil {
 			t.Errorf("key %q produced a command, want none", key)
@@ -635,7 +636,7 @@ func TestFooterPointsAtTheOverlayInsteadOfEnumerating(t *testing.T) {
 		}
 	}
 	// The keys it does not have must still exist somewhere.
-	help := strings.Join(helpLines("dev"), "\n")
+	help := strings.Join(helpLines(viewMerged, "dev"), "\n")
 	for _, want := range []string{"a add", "e edit", "s re-scope", "d delete", "u undo", "1/2/3", "tab"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("the ? overlay is missing %q:\n%s", want, help)
@@ -737,41 +738,52 @@ func TestFrameNeverExceedsThePane(t *testing.T) {
 		}},
 	}
 
+	// Both views, because the all-tasks view puts *more* lines in the body —
+	// group headers between the rows — and chromeHeight is a constant that
+	// counts only the chrome. A header that wrapped, or a header the viewport
+	// height did not account for, reappears here as a frame taller than the
+	// pane.
 	for _, version := range versions {
-		for _, size := range sizes {
-			for _, filter := range []string{"", "1", "2", "3"} {
-				for _, mode := range modes {
-					name := fmt.Sprintf("v=%s/%dx%d/filter=%q/%s", version, size.w, size.h, filter, mode.name)
-					t.Run(name, func(t *testing.T) {
-						m := newLoaded(t, Config{
-							DB: db, Scopes: scopes, Home: "/Users/x", Version: version,
-						})
-						sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
-						m = sized.(Model)
-						if filter != "" {
-							m = pressAndSettle(t, m, filter)
-						}
-						m = mode.enter(t, m)
-
-						// Asserted on the *unclamped* frame: checking View's
-						// output would let the clampHeight backstop hide a
-						// miscounted chromeHeight instead of failing on it.
-						lines := strings.Split(m.frame(), "\n")
-						if len(lines) > size.h {
-							t.Errorf("frame is %d rows in a %d-row pane; the terminal will scroll and the top rows are lost:\n%s",
-								len(lines), size.h, m.frame())
-						}
-						if got := strings.Split(m.View(), "\n"); len(got) != len(lines) {
-							t.Errorf("the height backstop fired (%d rows -> %d); it is a safety net, not the mechanism",
-								len(lines), len(got))
-						}
-						for i, line := range lines {
-							if w := lipgloss.Width(line); w > size.w {
-								t.Errorf("line %d is %d columns in a %d-column pane: %q",
-									i, w, size.w, line)
+		for _, view := range []string{"merged", "all"} {
+			for _, size := range sizes {
+				for _, filter := range []string{"", "1", "2", "3"} {
+					for _, mode := range modes {
+						name := fmt.Sprintf("v=%s/view=%s/%dx%d/filter=%q/%s", version, view, size.w, size.h, filter, mode.name)
+						t.Run(name, func(t *testing.T) {
+							m := newLoaded(t, Config{
+								DB: db, Scopes: scopes, Home: "/Users/x", Version: version,
+								LiveSessions: map[string]bool{"pulsar": true},
+							})
+							sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
+							m = sized.(Model)
+							if view == "all" {
+								m = pressAndSettle(t, m, "g")
 							}
-						}
-					})
+							if filter != "" {
+								m = pressAndSettle(t, m, filter)
+							}
+							m = mode.enter(t, m)
+
+							// Asserted on the *unclamped* frame: checking View's
+							// output would let the clampHeight backstop hide a
+							// miscounted chromeHeight instead of failing on it.
+							lines := strings.Split(m.frame(), "\n")
+							if len(lines) > size.h {
+								t.Errorf("frame is %d rows in a %d-row pane; the terminal will scroll and the top rows are lost:\n%s",
+									len(lines), size.h, m.frame())
+							}
+							if got := strings.Split(m.View(), "\n"); len(got) != len(lines) {
+								t.Errorf("the height backstop fired (%d rows -> %d); it is a safety net, not the mechanism",
+									len(lines), len(got))
+							}
+							for i, line := range lines {
+								if w := lipgloss.Width(line); w > size.w {
+									t.Errorf("line %d is %d columns in a %d-column pane: %q",
+										i, w, size.w, line)
+								}
+							}
+						})
+					}
 				}
 			}
 		}
@@ -847,12 +859,14 @@ func TestFooterSurvivesTheNarrowestPopup(t *testing.T) {
 // columns, and the whole thing inside the rows the list has.
 func TestHelpOverlayFitsTheNarrowestPopup(t *testing.T) {
 	for _, version := range []string{"", "dev", longVersion} {
-		for i, line := range helpLines(version) {
-			if strings.Contains(line, "\n") {
-				t.Errorf("version %q: help line %d spans rows: %q", version, i, line)
-			}
-			if w := lipgloss.Width(line); w > 42 {
-				t.Errorf("version %q: help line %d is %d columns, over 42: %q", version, i, w, line)
+		for _, view := range []viewKind{viewMerged, viewAll} {
+			for i, line := range helpLines(view, version) {
+				if strings.Contains(line, "\n") {
+					t.Errorf("view %d version %q: help line %d spans rows: %q", view, version, i, line)
+				}
+				if w := lipgloss.Width(line); w > 42 {
+					t.Errorf("view %d version %q: help line %d is %d columns, over 42: %q", view, version, i, w, line)
+				}
 			}
 		}
 	}
