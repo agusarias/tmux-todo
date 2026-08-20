@@ -9,6 +9,7 @@ wins over any task brief that contradicts it; `docs/tasks/` is the work queue.
 ```sh
 make build      # CGO_ENABLED=0 static binary -> ./bin/tdo
 make test       # go test ./...
+make test-plugin # the TPM plugin's shell harness; needs a tmux binary, NOT in `make test`
 make lint       # go vet ./... + gofmt check
 ./bin/tdo doctor          # schema version, journal mode, task counts
 ./bin/tdo doctor --db X   # ...against a throwaway database
@@ -36,6 +37,10 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - `internal/tui` also holds the input row (`input.go`, `field.go`) and the deferred
   delete queue (`delete.go`). Both are pure model state; the only I/O either does is a
   store command returned from `Update`.
+- `tmux-todo.tmux` — the TPM plugin entry point (bash 3.2; macOS has no newer one).
+  Resolves the binary, installs the keybind and the rename hook. tmux sources it on
+  **every server start**, so the resolved path stays cheap. `test/plugin_install_test.sh`
+  drives it against private `tmux -L` servers; `make test-plugin` runs that.
 - `internal/cli` — stdlib `flag` with manual subcommand dispatch. Also owns the two
   tmux-facing side jobs: refreshing the `session_id -> name` map on every resolve
   (`openEnv`) and the `session-renamed` subcommand the tmux hook calls.
@@ -217,6 +222,38 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   in the capture. This is how the keybind, the computed size and the footer width were
   proven; `-c <client>` is also what makes a scripted `display-popup` stop answering
   "no current client".
+- **`show-hooks -g` prints a bare `session-renamed` line when there are ZERO hooks.**
+  So `show-hooks -g | grep -c session-renamed` answers 1 for an empty hook list, and any
+  de-dup built on a *name* grep silently skips installing the hook — the failure direction
+  that leaves the rename broken. Grep the hook's **body** instead. Both halves are proven by
+  mutation: delete the guard and hooks stack `[0][1][2]`; make it a name grep and the hook is
+  never installed at all. The body grep must also be **path-specific**, or an install at a
+  new path matches the stale hook and skips itself, leaving only the broken one.
+- **A whole `if-shell` brace block can be passed as ONE shell argument to `bind-key`.**
+  `tmux-integration-and-rename-hook`'s handoff said the brace form needs `source-file` or
+  careful nested quoting to install from a shell. It does not:
+  `tmux bind-key -T prefix t "if-shell -F '…' { … }"` hands tmux's own parser exactly the
+  text it wants, and `list-keys` renders it
+  byte-identically to `source-file`-ing the same snippet. No temp file, no escaping.
+  Verified on tmux 3.7b. What *cannot* be escaped is a quote inside the interpolated path —
+  tmux's single-quoted strings have no escape character — so a path containing `'` or `"` is
+  treated as a resolution failure rather than a keybind that breaks on press.
+- **`show-option -gqv <unset-option>` prints NOTHING — not even a newline.** So
+  `tmux show-option -gqv @x \; show-hooks -g` cannot be split on the first line: when the
+  option is unset, line 1 is `after-bind-key`, the first hook, and gets read as the value.
+  Combining a read with another read to save a round-trip is not safe here; combining the
+  two *writes* is.
+- **tmux's default prefix table already binds `t` (clock-mode) and `w` (choose-tree).**
+  A test that counts bindings for a key therefore counts tmux's own and passes with the
+  plugin deleted — the vacuous-guard trap again. Count bindings whose *command* is the
+  plugin's (`display-popup`), and assert the total for the key is 1 so a second binding is
+  still caught.
+- **A sandboxed `PATH` in a shell test is a vacuous-test machine.** `env -i PATH=$only_stubs`
+  left no `bash` (so the script never ran and 22 assertions "failed" for the wrong reason)
+  and no `grep` (so the hook guard silently never executed). Put the system tool dirs on the
+  sandbox PATH and sandbox only the binaries under test — then assert the sandbox really
+  lacks them, so the suite fails loudly instead of degrading if `tdo` or `go` shows up in
+  `/usr/bin` later.
 - **`t.TempDir()` is itself under a symlink on macOS** (`/var` -> `/private/var`),
   so scope tests compare against `normalizePath(tmp)`, never the raw temp path.
 - **Resolution costs one `tmux display-message`** (~5ms of a ~5.7ms cold median),

@@ -229,8 +229,39 @@ set -g @plugin 'agusarias/tmux-todo'
 set -g @todo-key 't'
 ```
 
-The plugin script installs the popup keybind, installs the `session-renamed` hook, and
-resolves the `tdo` binary.
+`tmux-todo.tmux` installs the popup keybind (the `if-shell` size branch above, in the
+**prefix** table, under `@todo-key` or `t`) and appends the `session-renamed` hook. Those two
+commands are recorded verbatim in
+`docs/tasks/done/2026-08-19-tmux-integration-and-rename-hook.md`.
+
+**Binary resolution is a four-step chain**, stopping at the first success:
+
+1. `tdo` on `$PATH` — a user's own install wins over anything we built
+2. `$PLUGIN_DIR/bin/tdo`, if executable — so a build happens once, not per start
+3. `go build` into `$PLUGIN_DIR/bin/tdo`, only if `go` is present and >= 1.25
+4. otherwise **no keybind at all**, plus a message naming the problem and the fix
+
+Step 4 not binding anything is the deliberate part: a keybind onto a missing binary
+misattributes the failure to press time rather than install time. A `go version` the script
+cannot parse falls to step 4 rather than optimistically building, because building with an
+old toolchain fails with a message about the `go` directive that reads like a bug in this
+repo.
+
+The chain ends in a *source build* rather than a download because there is no release
+infrastructure to download from — no tags, no CI, and `bin/` is gitignored. Fetching a
+prebuilt binary is the better end state and is deferred to its own task, at which point step
+3 becomes "download, then build as a fallback".
+
+**TPM sources plugin scripts on every server start**, not only at install, which shapes the
+whole script: steps 1 and 2 do no build and no network. `bind-key` *replaces* a binding, so
+re-running is idempotent for free; `set-hook -ga` *appends*, so the hook install is guarded
+by a grep of the existing hook's **body** — a grep of its *name* matches the bare
+`session-renamed` line tmux prints for zero hooks and would silently skip installing. `-ga`
+rather than `-g` is what keeps a user's own `session-renamed` hook alive.
+
+The cost of that re-run is four tmux round-trips, ~31ms on the measured machine, once per
+tmux **server** start. Building from source is Go **1.25**, the floor `modernc.org/sqlite`
+needs; `go.mod` declares exactly that so the plugin can build for as many people as possible.
 
 ## v1 cut line
 
