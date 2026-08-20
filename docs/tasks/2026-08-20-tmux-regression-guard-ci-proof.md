@@ -1,7 +1,7 @@
 # Make The Tmux Regression Guard CI-Proof
 
-**Status:** ready
-**Worktree:** ../todo-tmux-regression-guard (work committed on branch `tmux-regression-guard`, not merged)
+**Status:** review
+**Worktree:** none (merged and removed)
 
 ## Goal
 `internal/scope`'s regression tests must fail against the tmux-blindness bug on a machine
@@ -194,6 +194,28 @@ the brief lives only on `main`, so a later merge cannot conflict.
 - **2026-08-20 (curator, Checkpoint 1 APPROVED):** mini-plan below signed off as written.
   Status `ready`.
 
+- **2026-08-20 (executor, resumed pass):** the branch was 10 commits behind `main` by the
+  time the block was answered, so `main` was merged **into** the branch first (`220eced`)
+  rather than the fix being written against a stale tree. That mattered more than
+  bookkeeping: `all-tasks-view` had changed `tui.Run` to return `(tui.Jump, error)`, so a
+  seam written against the old single-return signature would not have compiled — and the
+  in-tmux hang had to be re-confirmed post-merge before being fixed, which it was (the
+  timeout dump carries the new 39-column footer).
+- **2026-08-20 (executor):** the seam's guard is the substituted program's **call count**
+  inside `TestTUIWiringSmoke`, not a separate test. A second test asserting "runTUI goes
+  through the seam" would have asserted exactly what the count already does. The count is
+  what makes the fix self-guarding: a change that inlined `tui.Run` again fails it, and
+  fails it **outside** tmux, so CI sees a regression that would otherwise present only as a
+  hang — the one failure mode a test suite cannot report on itself.
+- **2026-08-20 (executor):** the smoke test's assertions had to invert — exit 0 and empty
+  stderr, where it previously wanted exit 1 and a non-empty stderr. That is not a weakened
+  test but the removal of a false premise: it was asserting that the popup *failed*, and
+  "the popup failed" was never the thing worth covering. Its doc comment, which the curator
+  flagged as simply false, is rewritten to say what is actually true.
+- **2026-08-20 (executor):** `TestTUIErrorFromTheProgramIsReported` added alongside, because
+  the seam replaced the only path by which `tui.Run`'s error reached the exit code. Without
+  it the substitution could swallow a failed queued delete and nothing would notice.
+
 ## Plan
 **Approach:** two-line test change plus a third verification run. No production code moves —
 `NewResolver` is already correct; only the test that guards it is vacuous.
@@ -233,105 +255,186 @@ failure output, or this task has not been verified.
 
 ## Evidence
 
-Worktree `../todo-tmux-regression-guard`, go1.26.6, tmux 3.7b, macOS arm64. The in-tmux legs
-run on a private socket (`tmux -L`); the mutated copies live under a scratch dir and the
-worktree was never mutated.
+Worktree `../todo-tmux-regression-guard`, go1.26.6, tmux 3.7b, macOS arm64. Two commits:
+`aabfac5` (the `internal/scope` guard, from the pass that ended blocked) and `38272d4` (the
+`internal/cli` seam), with `main` merged in between at `220eced`. All in-tmux runs use a
+private socket (`tmux -L`), so nothing touches the user's own server. All mutations run in a
+throwaway **clone** under a scratch dir; the worktree was never mutated.
 
 ### DoD 3 — the run this task exists for
 
-**Before**, reproducing the vacuity the brief describes. A copy of the tree with
-`NewResolver()` reverted to `return Resolver{}`, outside tmux:
+A real `git clone` of the branch, `NewResolver()` reverted to `return Resolver{}`, outside
+tmux. Three runs, so the change is a measurement rather than a claim:
+
+| tree | `env -u TMUX go test ./internal/scope/` | pass | fail | skip |
+|---|---|---|---|---|
+| **before** — old test + the bug | `ok ... 0.650s` | 48 | **0** | 1 |
+| **after** — new test + the bug | `FAIL ... 0.645s` | 51 | **2** | 2 |
+| control — new test, no bug | `ok ... 0.587s` | 53 | 0 | 2 |
+
+The "before" row is the vacuity this task was filed for: the entire regression net for a bug
+that already shipped once, green against that very bug on the only kind of machine CI has.
+(The brief recorded 30/30; the count grew because `tmux-integration-and-rename-hook` and
+`all-tasks-view` added tests to this package meanwhile. The vacuity was unchanged.)
+
+The "after" failure:
 
 ```
-$ env -u TMUX go test ./internal/scope/ -count=1
-ok  	github.com/agusarias/tmux-todo/internal/scope	0.969s
-
-passing: 36    failing: 0    skipped: 1
-```
-
-The whole regression net for a bug that already shipped once, green against that very bug.
-(The brief recorded 30/30; the count grew to 36 because `tmux-integration-and-rename-hook`
-added tests to this package in the meantime. The vacuity is unchanged.)
-
-**After**, same mutation, same command, against the fixed test:
-
-```
-$ env -u TMUX go test ./internal/scope/ -count=1
 --- FAIL: TestNewResolverCarriesTmuxEnv (0.00s)
     --- FAIL: TestNewResolverCarriesTmuxEnv/carries_a_set_TMUX (0.00s)
         scope_test.go:522: NewResolver().TmuxEnv = "", want the faked $TMUX
         "/tmp/fake-tmux-socket,1,0" — the constructor is not reading the environment,
         so session scope is unreachable in the shipped binary
-FAIL
-FAIL	github.com/agusarias/tmux-todo/internal/scope	0.784s
-
-passing: 48    failing: 2    skipped: 1
+FAIL	github.com/agusarias/tmux-todo/internal/scope	0.645s
 ```
 
-36 passing / 0 failing → 48 passing / 2 failing. The guard now discriminates on a machine
-with no tmux, which is the only kind of machine CI has.
+*A false start worth recording:* the first mutated copy was a bare `git archive` extract, not
+a repo, so `TestResolveAgainstRealEnvironment` also failed — on "Dir key … is the package
+directory, not a repo root", nothing to do with the mutation. A mutation run whose extra
+failures come from the harness cannot show what the mutation did, so the copy became a real
+clone. Two failures in the table above, not three.
 
 ### DoD 1, 2 — both directions of the constructor
 
 ```
 $ go test ./internal/scope/ -run TestNewResolverCarriesTmuxEnv -v
-=== RUN   TestNewResolverCarriesTmuxEnv/carries_a_set_TMUX
-=== RUN   TestNewResolverCarriesTmuxEnv/carries_an_unset_TMUX
---- PASS: TestNewResolverCarriesTmuxEnv (0.00s)
-    --- PASS: TestNewResolverCarriesTmuxEnv/carries_a_set_TMUX (0.00s)
-    --- PASS: TestNewResolverCarriesTmuxEnv/carries_an_unset_TMUX (0.00s)
+--- PASS: TestNewResolverCarriesTmuxEnv
+    --- PASS: TestNewResolverCarriesTmuxEnv/carries_a_set_TMUX
+    --- PASS: TestNewResolverCarriesTmuxEnv/carries_an_unset_TMUX
 ```
 
-The set leg asserts against a sentinel `$TMUX` the host cannot coincidentally match, so it
-has something to be wrong about wherever it runs. The unset leg pins the other direction —
-`TmuxEnv` empty *and* `Resolve()` yielding no session scope — because a constructor that
-hardcoded a non-empty string would satisfy the first leg alone, and the zero value satisfies
-the second alone. Neither leg dials a socket; `NewResolver` only reads the variable.
-
-Per the Constraints, the unset leg reaches `Resolve()` but not `StickyDefault`, so no state
-dir is touched. `t.Setenv` is used and no test in this file calls `t.Parallel()`.
+The set leg fakes `$TMUX` with a sentinel the host cannot coincidentally match, so the
+assertion has something to be wrong about wherever it runs. The unset leg pins the other
+direction — `TmuxEnv` empty **and** `Resolve()` yielding no session scope — because a
+constructor that hardcoded a non-empty string would satisfy the first leg alone and the zero
+value satisfies the second alone. Neither leg dials a socket; `NewResolver` only reads the
+variable. Per the Constraints the unset leg reaches `Resolve()` but not `StickyDefault`, so
+no state dir is touched, and no test in the file calls `t.Parallel()`.
 
 ### DoD 4 — the live legs, both ways
 
-Inside tmux (private socket, `TMUX=/private/tmp/tmux-501/tdoscope,95365,0`):
+Inside tmux (`TMUX=/private/tmp/tmux-501/live48121,48126,0`), 55 pass / 0 fail / **0 skip**:
 
 ```
-passing: 51    failing: 0    skipped: 0
+--- PASS: TestAgreesWithGitBinary
 --- PASS: TestResolveAgainstRealEnvironment
 --- PASS: TestPackageResolveMatchesTheRealEnvironment
---- PASS: TestNewResolverCarriesTmuxEnv  (+ both subtests)
+--- PASS: TestNewResolverCarriesTmuxEnv
 --- PASS: TestStickyDefaultReachesSessionInTheRealEnvironment
-    scope_test.go:421: resolved in 5.441292ms (TMUX="/private/tmp/tmux-501/tdoscope,95365,0")
+--- PASS: TestLiveSessionsAgainstARealServer
+    scope_test.go:421: resolved in 5.280625ms (TMUX="/private/tmp/tmux-501/live48121,48126,0")
     scope_test.go:492: live tmux: Resolve() session = session=scope
+```
+
+Outside tmux, 53 pass / 0 fail / **2 skip** — the two live legs, skipping cleanly:
+
+```
+--- PASS: TestResolveAgainstRealEnvironment
+--- PASS: TestPackageResolveMatchesTheRealEnvironment
+--- PASS: TestNewResolverCarriesTmuxEnv
+--- SKIP: TestStickyDefaultReachesSessionInTheRealEnvironment
+--- SKIP: TestLiveSessionsAgainstARealServer
+```
+
+`tmuxAlive()` still gates in both directions, and the faked-`$TMUX` legs run either way.
+
+### DoD 5 — the hang, and the suite green both ways
+
+**The hang, re-confirmed on this tree** before fixing it, in a tmux pane. Note the footer:
+this is the post-`all-tasks-view` frame, so it is not an artifact of the older tree the
+previous pass tested.
+
+```
+$ go test ./internal/cli/ -run TestTUIWiringSmoke -timeout 20s   # inside tmux
+╭──────────────────────────────────────────────────────────────────────╮
+│  tdo                                                                 │
+│  no tasks yet                                                        │
+│  j/k move · space done · ? keys · q quit                             │
+╰──────────────────────────────────────────────────────────────────────╯panic: test timed out after 20s
+	running tests:
+		TestTUIWiringSmoke (20s)
+...
+github.com/charmbracelet/bubbletea.(*Program).eventLoop(...)
+FAIL	github.com/agusarias/tmux-todo/internal/cli	20.621s
+```
+
+**After the seam — `make test` completes inside tmux.** This run is the point of the fix:
+
+```
+$ echo $TMUX
+/private/tmp/tmux-501/full47514,47519,0
+$ make test
+go test ./...
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli    0.663s
+ok  	github.com/agusarias/tmux-todo/internal/scope  1.058s
+ok  	github.com/agusarias/tmux-todo/internal/store  (cached)
+ok  	github.com/agusarias/tmux-todo/internal/task   (cached)
+ok  	github.com/agusarias/tmux-todo/internal/tui    5.381s
+EXIT=0
+$ make lint
+go vet ./...
+LINT_EXIT=0
+$ gofmt -l .
+(empty)
 ```
 
 Outside tmux:
 
 ```
-$ env -u TMUX go test ./internal/scope/ -count=1 -v
-passing: 50    skipped: 1
---- SKIP: TestStickyDefaultReachesSessionInTheRealEnvironment (0.00s)
-ok  	github.com/agusarias/tmux-todo/internal/scope	0.834s
-```
-
-`tmuxAlive()` still gates correctly in both directions: the live leg runs inside tmux and
-skips cleanly outside it, and the faked-`$TMUX` legs run in both.
-
-### DoD 5 — partly done, and blocked on the rest
-
-```
 $ env -u TMUX make test
-ok  	github.com/agusarias/tmux-todo/internal/cli    0.855s
-ok  	github.com/agusarias/tmux-todo/internal/scope  1.319s
+go test ./...
+ok  	github.com/agusarias/tmux-todo/internal/cli    0.569s
+ok  	github.com/agusarias/tmux-todo/internal/scope  0.585s
 ok  	github.com/agusarias/tmux-todo/internal/store  (cached)
 ok  	github.com/agusarias/tmux-todo/internal/task   (cached)
 ok  	github.com/agusarias/tmux-todo/internal/tui    (cached)
-$ make lint
+$ make lint && gofmt -l .
 go vet ./...
-lint clean
-$ gofmt -l .
 (empty)
+$ CGO_ENABLED=0 make build && otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
 ```
 
-Inside tmux the full suite does not complete — see `## Blocked`. `internal/scope` itself is
-green inside tmux (51/51 above); the hang is `internal/cli`'s and predates this task.
+Still no libsqlite3.
+
+### The seam's own guard discriminates
+
+`runTUI` mutated back to calling `tui.Run` directly, in a throwaway copy, **outside** tmux —
+which is the part that matters, because a hang is invisible to CI but this is not:
+
+```
+--- FAIL: TestTUIWiringSmoke (0.02s)
+    cli_test.go:170: exit code 1, want 0: tdo: run tui: could not open a new TTY:
+        open /dev/tty: device not configured
+    cli_test.go:173: a clean run wrote to stderr: "tdo: run tui: could not open a new TTY..."
+    cli_test.go:176: the substituted program ran 0 times, want 1 — runTUI is not going
+        through runTUIProgram, so `go test` inside tmux starts a real popup and hangs
+FAIL	github.com/agusarias/tmux-todo/internal/cli	0.240s
+```
+
+### Scope kept
+
+`internal/cli` changed in exactly two places: `var runTUIProgram = tui.Run` plus its one call
+site, and `cli_test.go`'s substitution. **What `tui.Config` contains is not asserted** — the
+Constraints put that in `2026-08-20-assert-tui-config-wiring.md`, and it is still open there.
+`git show 38272d4 --stat` is two files.
+
+### Not proven here
+
+- **That the suite can never hang again.** No test can assert the absence of a hang; the
+  seam's call count is the closest available proxy, and the in-tmux `make test` above is the
+  direct evidence for this tree. A future package that starts a program from a test would
+  need its own seam.
+- **CI itself.** There is no CI in this repo yet (`2026-08-20-release-binaries-and-ci.md`,
+  `draft`). `env -u TMUX` is the stand-in for a runner with no tmux, which is the condition
+  the whole task is about.
+
+### Merge
+
+Branch `tmux-regression-guard`, commits `aabfac5` and `38272d4` (with `main` merged in at
+`220eced`), merged into local `main` and the worktree removed. Not pushed.
+
+Merge commit: `<recorded below>`

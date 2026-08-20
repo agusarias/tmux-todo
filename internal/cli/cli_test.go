@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/task"
+	"github.com/agusarias/tmux-todo/internal/tui"
 )
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -121,14 +123,34 @@ func TestDoctorReportsBadPath(t *testing.T) {
 	}
 }
 
+// stubTUIProgram replaces the popup for the duration of one test.
+//
+// It exists because the popup must not actually start. TestTUIWiringSmoke used
+// to rely on tui.Run *failing* for want of a terminal — which is not true inside
+// tmux, where Bubble Tea opens /dev/tty directly, so the popup rendered into the
+// developer's pane and the test hung until the timeout panic. See runTUIProgram.
+func stubTUIProgram(t *testing.T, fn func(tui.Config) (tui.Jump, error)) {
+	t.Helper()
+	prev := runTUIProgram
+	runTUIProgram = fn
+	t.Cleanup(func() { runTUIProgram = prev })
+}
+
 // TestTUIWiringSmoke covers runTUI's assembly — resolve the data dir, open the
 // store, resolve scopes, build the tui.Config — which had no test at all.
 //
-// It cannot get as far as a rendered popup: Bubble Tea needs a TTY and a test
-// process has none, so tui.Run fails at the last step. Everything before that
-// step is real, which is the part worth covering: a panic or a nil store would
-// surface here, and the "database is created" assertion proves the wiring ran
-// rather than bailing early.
+// The popup is stubbed out, so what is covered is everything up to and including
+// the call: a panic or a nil store surfaces here, the "database is created"
+// assertion proves the wiring ran rather than bailing early, and the call count
+// proves it did not bail *late* either.
+//
+// That count is also the guard on the fix: it is the *seam* that keeps
+// `make test` from hanging inside tmux, so a change that inlined tui.Run again
+// would silently restore the hang — and a hang is the one failure mode a test
+// suite cannot report on itself.
+//
+// What the tui.Config contains is deliberately not asserted here; that is
+// docs/tasks/2026-08-20-assert-tui-config-wiring.md.
 //
 // XDG_DATA_HOME is redirected first. Without it this test would open — and
 // create — the developer's real task database.
@@ -136,18 +158,48 @@ func TestTUIWiringSmoke(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
 
+	var calls int
+	stubTUIProgram(t, func(tui.Config) (tui.Jump, error) {
+		calls++
+		return tui.Jump{}, nil
+	})
+
 	code, _, stderr := run(t, "tui")
 
-	if code != 1 {
-		t.Errorf("exit code %d, want 1 (no TTY in a test process)", code)
+	if code != 0 {
+		t.Errorf("exit code %d, want 0: %s", code, stderr)
 	}
-	if stderr == "" {
-		t.Error("the failure produced no stderr")
+	if stderr != "" {
+		t.Errorf("a clean run wrote to stderr: %q", stderr)
+	}
+	if calls != 1 {
+		t.Errorf("the substituted program ran %d times, want 1 — runTUI is not going"+
+			" through runTUIProgram, so `go test` inside tmux starts a real popup and hangs", calls)
 	}
 	// The store was opened before the TUI was reached, so the wiring ran.
 	db := filepath.Join(dir, store.AppDir, store.DBName)
 	if _, err := os.Stat(db); err != nil {
 		t.Errorf("runTUI did not open a database at %s: %v", db, err)
+	}
+}
+
+// TestTUIErrorFromTheProgramIsReported — the seam must not swallow the failure
+// path it replaced. A queued delete that failed on the way out reaches the exit
+// code through here, and reporting "deleted" for a row still in the database
+// would be worse than the delete not happening.
+func TestTUIErrorFromTheProgramIsReported(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	stubTUIProgram(t, func(tui.Config) (tui.Jump, error) {
+		return tui.Jump{}, errors.New("commit queued deletes: disk on fire")
+	})
+
+	code, _, stderr := run(t, "tui")
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "disk on fire") {
+		t.Errorf("stderr does not carry the failure: %q", stderr)
 	}
 }
 
