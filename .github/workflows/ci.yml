@@ -49,6 +49,28 @@ jobs:
       # 24.04 and macOS 15 readmes, checked 2026-08-20). If an image ever gains
       # it, the fix is to mask it for this job — e.g. move the binary aside, or
       # run the suite with a PATH that excludes it — NOT to delete this step.
+      # ubuntu-latest DOES ship tmux, at /usr/bin/tmux — observed on this repo's
+      # first real CI run (2026-08-20). The runner-images README does not list
+      # it, which is why the assertion below existed before this step did: the
+      # assertion is the contract, and it caught the image rather than the image
+      # quietly invalidating the job. Masking is how the contract gets met, and
+      # is exactly what that step's own comment instructs instead of deleting it.
+      #
+      # The loop re-checks rather than assuming one path, so a second copy
+      # further down PATH cannot survive. Bounded, so a failing mv cannot spin.
+      - name: Mask tmux for this job
+        run: |
+          for _ in 1 2 3 4 5; do
+            p=$(command -v tmux 2>/dev/null) || break
+            echo "masking $p"
+            sudo mv "$p" "$p.masked-for-ci"
+          done
+          if command -v tmux >/dev/null 2>&1; then
+            echo "::error::could not mask tmux at $(command -v tmux)"
+            exit 1
+          fi
+          echo "tmux is masked; the assertion below should now pass"
+
       - name: Assert the runner has no tmux
         run: |
           if command -v tmux >/dev/null 2>&1; then
@@ -88,6 +110,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends tmux
           tmux -V
+
+      # The harness refuses to run if `tdo` or `go` is present in /usr/bin, /bin,
+      # /usr/sbin or /sbin: its resolution cases sandbox PATH down to the system
+      # tool dirs, so a `go` reachable there means the "no toolchain" cases test
+      # nothing. ubuntu-latest ships /usr/bin/go, so the first CI run aborted —
+      # loudly and correctly, which is the anti-vacuity guard doing its job.
+      #
+      # Mask them, and then prove setup-go's toolchain is still reachable: the
+      # go-build resolution case needs a usable `go` on the *normal* PATH at the
+      # same time as no `go` in the system dirs. Those two facts are what make
+      # both halves of the chain testable.
+      - name: Mask system tdo/go so the harness sandbox is real
+        run: |
+          for d in /usr/bin /bin /usr/sbin /sbin; do
+            for t in tdo go; do
+              if [ -e "$d/$t" ]; then
+                sudo mv "$d/$t" "$d/$t.masked-for-ci"
+                echo "masked $d/$t"
+              fi
+            done
+          done
+          echo "setup-go's toolchain must still resolve:"
+          command -v go
+          go version
 
       - name: make test-plugin
         run: make test-plugin
