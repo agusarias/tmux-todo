@@ -1,7 +1,7 @@
 # Popup TUI Merged List
 
-**Status:** review
-**Worktree:** none (removed after merge)
+**Status:** ready
+**Worktree:** none
 
 ## Goal
 The default popup view: session, dir and global tasks merged into one list with a per-row
@@ -83,6 +83,13 @@ touches no auth, sends nothing externally, and publishes no API beyond the inter
 18. `go test ./...`, `go vet ./...` clean, `gofmt -l .` empty; `CGO_ENABLED=0 make build`
     still yields a binary with no libsqlite3 in `otool -L`.
 19. Tests use real SQLite files under `t.TempDir()`, per repo convention.
+20. **The assembled frame never exceeds the pane in either dimension.** A committed
+    table test over `View()` across several widths and heights — including narrow ones
+    (40, 44, 48, 64 columns) and a long `Version` string — asserts that the rendered
+    frame's line count is <= the model's height and that no line's display width
+    exceeds the model's width. Truncating `footer()` (and `titleLine()`) to the content
+    width is the fix; the test is what closes the class. `chromeHeight`'s assumption
+    that the footer is exactly one row must either hold by construction or be counted.
 
 ## Verification
 Headless Go tests only, against real SQLite files in `t.TempDir()`. `Update` and `View`
@@ -182,6 +189,66 @@ overlay remains unverifiable headlessly regardless (CLAUDE.md), and lands with
   `tdo tui` has no `--db` flag, but `store.DefaultPath` honours `$XDG_DATA_HOME`, which makes
   a throwaway database reproducible without one. It earned its keep: it caught three defects
   the headless tests could not see (see Evidence).
+
+### 2026-08-20 — Checkpoint 2 rejected (1st): footer overflows the frame. Fix forward.
+The 19 DoD items were all met and the evidence held up under audit (mutation-testing the
+`len(scopes)==0` short circuit and the `renderRows` ordering guard reproduced the quoted
+failures exactly; `otool -L` clean; 38 tests real). Rejected anyway for a defect the DoD
+did not cover:
+
+`footer()` (`tui.go:368`) is never truncated to the content width, while `chromeHeight`
+(`tui.go:40`) is a constant `6` that assumes the footer occupies exactly one row. When the
+footer wraps, the frame is one row taller than the pane, and per this repo's own pitfall an
+over-tall frame makes the terminal **scroll** — so the rows lost are the *top* ones (box
+border, then session tier and tier labels), not the bottom.
+
+Footer width is `36 + len(Version)`, and `Makefile:3` stamps `Version` from
+`git describe --tags --always --dirty`. So the minimum usable popup width **depends on the
+build's git state**: `dev` wraps below 45 columns, this repo's current `ec132f9` below 49,
+a `-dirty` describe (23 chars) below 65. Reproduced in a tmux pane at 48x12 — which is
+`design.md:47`'s `~60%x60%` on a standard 80x20 terminal — with the top border already
+scrolled off. `design.md:71`'s end-state footer is 92 columns, so every follow-on UI task
+raises the threshold.
+
+Chosen: **fix forward** (the merge stays; no revert). The change is additive and the rest of
+the task is sound.
+
+Root cause is the missing test, not the missing truncate: none of the 38 tests asserts
+anything about the *assembled frame's* dimensions. All three frame bugs found in this task
+were caught by a capture at a single fixed 80x20 size. Hence new **DoD 20** — a frame
+invariant test across widths — which is what actually closes the class. Truncating the
+footer alone would leave the next added key free to reintroduce it.
+
+Also folded in from the audit, non-blocking:
+- `render.go:246` — `textStyle`'s godoc opens with a copy-pasted `truncateLeft` sentence.
+  Fix while in there.
+- `internal/cli/cli.go`'s 43 new lines (`runTUI`: store open, scope resolve, Config
+  assembly) have **zero** test coverage. Not a new DoD item, but worth a smoke test if
+  cheap.
+- `go.mod` bumped 5 transitive deps and added 3 new ones beyond `bubbles`, unremarked in
+  Evidence. `clipperhouse/displaywidth` now backs `lipgloss.Width` — the primitive the
+  accepted ambiguous-width risk depends on. The risk was accepted against a different
+  implementation than the one now in the tree; note it in Evidence next time, and DoD 20's
+  width assertions now exercise it.
+- The blocker recorded under "Blocking finding for another task" is **resolved**:
+  `scope-resolution`'s fix-forward merged as `d69dd4d`, and a session-scoped task now
+  renders with its tier label in a real tmux pane. That section is history, not a live issue.
+
+### Plan delta for the fix-forward pass
+Scope is small and additive; the approved approach below still stands.
+1. Truncate `footer()` and `titleLine()` to the content width (`m.width - chromeWidth`),
+   reusing the existing `truncate`/`ellipsis` helpers in `render.go` rather than a new one.
+2. Add the DoD 20 table test in `tui_test.go`: for each of several `(width, height)` pairs
+   and both a short and a long `Version`, build the model, feed a
+   `tea.WindowSizeMsg`, render `View()`, and assert `len(lines) <= height` and
+   `lipgloss.Width(line) <= width` for every line. Seed enough rows to fill the viewport,
+   since the bug only shows with a full list.
+3. Decide explicitly whether `chromeHeight` stays a constant (safe once both chrome lines
+   are truncated) or becomes computed; if it stays constant, say why in a comment, because
+   the constant is what made this bug invisible.
+4. Fix the `render.go:246` godoc while in the file.
+5. Re-run the full verification sweep from DoD 18, and re-run the tmux `capture-pane`
+   check at 48x12 and 64x14 specifically — the sizes that failed.
 
 ## Plan
 **Approach:** replace the placeholder model with a real list model that is a pure function
