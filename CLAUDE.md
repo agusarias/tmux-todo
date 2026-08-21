@@ -386,6 +386,12 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   documented in the usage text, and **asserted** by
   `TestListDirOfADeletedSymlinkedPathIsTheDocumentedGap` — a known limitation with no test
   becomes a silent regression the day someone "improves" the fallback.
+- **A test that exercises a `--db` misparse can write a database into the repo.** The
+  `list --db --json` leg of the dash-guard table creates a file literally called `--json` in
+  whatever the cwd is whenever the guard is absent — which is exactly what a mutation proof
+  arranges, and it got a 32KB SQLite file committed as `internal/cli/--json` once. The leg is
+  worth keeping, so it does `t.Chdir(t.TempDir())` first. Any test whose *failure* mode is
+  creating a file needs somewhere disposable to be standing.
 - **stdlib `flag` stops at the first positional, and reordering around it needs
   the FlagSet itself.** `tdo add "text" --global` drops `--global` into
   `fs.Args()`, so it is silently ignored — a task filed to the wrong scope at exit

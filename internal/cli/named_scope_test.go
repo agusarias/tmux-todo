@@ -173,6 +173,12 @@ func TestDashLeadingSelectorValueIsAUsageError(t *testing.T) {
 		{"list --db --json", []string{"list", "--db", "--json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// Somewhere disposable to be cwd, because the "list --db --json" leg
+			// creates a database called "--json" if the guard is ever missing —
+			// and it was: running the mutation proof from the package directory
+			// committed a 32KB SQLite file called internal/cli/--json. A test
+			// whose failure mode is littering the repo should not be able to.
+			t.Chdir(t.TempDir())
 			fakeContext{}.install(t)
 			code, stdout, stderr := run(t, tc.args...)
 			if code != 2 {
