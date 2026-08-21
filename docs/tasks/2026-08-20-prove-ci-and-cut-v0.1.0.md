@@ -321,3 +321,98 @@ check. **Step 6 is a product decision, not a technical one**, and it is the open
 `session-renamed-hook-targets-wrong-session` is still `in-progress`, so `v0.1.0` today would
 ship a release whose rename-following silently does nothing. Either the fix lands first, or the
 release notes say so plainly and point at the all-tasks view's re-home as the workaround.
+
+### Step 6 complete: v0.1.0 is cut (DoD 6), and CI is green on the tagged commit (DoD 1, 9)
+
+**The product blocker cleared first.** Step 6 was held because
+`session-renamed-hook-targets-wrong-session` was open, and cutting a release whose headline
+rename feature silently did nothing would have needed a release note admitting it. That fix
+landed and was approved at Checkpoint 2 (merge `174f829`), so `v0.1.0` ships it working. No
+caveat was needed.
+
+**The tag is `b8dbf9e`, and it was chosen rather than defaulted to.** At the moment of the
+decision `main` carried an unreviewed feature (the sticky all-tasks view) on top of a CI-green
+commit, so the options were "tag the green reviewed commit and leave the feature for v0.1.1" or
+"review it, push, re-run CI, tag everything". The user chose the second. Both CI runs are
+recorded because the first one is what proved the harness fix:
+
+| run | commit | result |
+|---|---|---|
+| `32519409733` | `f8f054d` | all seven jobs green — the tmux 3.4 quote-key fix proven on the runner |
+| `32521344469` | `b8dbf9e` | all seven jobs green — the tagged commit |
+
+```
+✓ go (ubuntu-latest)          ✓ cross-compile (darwin, arm64)
+✓ go (macos-latest)           ✓ cross-compile (darwin, amd64)
+✓ plugin harness              ✓ cross-compile (linux, amd64)
+                              ✓ cross-compile (linux, arm64)
+```
+
+**Release run `32521504370`: green.** Five assets, the contract names unchanged from the
+rehearsal, and this time `isPrerelease` is **false** — which is the whole point of the
+`c0cd1fe` safeguard being exercised in both directions:
+
+```
+tag=v0.1.0 prerelease=false draft=false
+checksums.txt        330
+tdo-darwin-amd64  7906736
+tdo-darwin-arm64  7761986
+tdo-linux-amd64   7786680
+tdo-linux-arm64   7667896
+```
+
+**`/releases/latest/download/` resolves for the first time in the project's history.** It
+returned HTTP 404 before any release existed and *still* 404'd with the `v0.0.1-test`
+prerelease published — the two measurements that made the prerelease fix believable. Now:
+
+```
+$ curl -sIL -o /dev/null -w '%{http_code}' \
+    https://github.com/agusarias/tmux-todo/releases/latest/download/tdo-darwin-arm64
+200
+```
+
+That URL is the plugin's step-3 download path, so this is the first moment
+`tmux-todo.tmux` can install by download from a real release.
+
+**One asset downloaded and verified by hand, off the published release:**
+
+```
+published: 10800ddf87d9bb89f149683af28e60cb55fa6205eac560b3aa2569c4e0540403
+computed : 10800ddf87d9bb89f149683af28e60cb55fa6205eac560b3aa2569c4e0540403   MATCH
+
+$ ./tdo-darwin-arm64 --version
+v0.1.0
+$ ./tdo-darwin-arm64 doctor --db <throwaway>
+tdo      v0.1.0
+runtime  go1.25.0 darwin/arm64
+schema   2 (latest 2)
+journal  wal
+tasks    0 pending, 0 total
+ok
+$ otool -L ./tdo-darwin-arm64
+  /usr/lib/libSystem.B.dylib
+  /usr/lib/libresolv.9.dylib          # no libsqlite3
+```
+
+Both sides were checked non-empty before the match was claimed — the vacuous-comparison trap
+recorded at step 4, where an empty download once compared equal to an empty checksum.
+
+**DoD 6's local half:** `make build` now stamps a real version for the first time in the
+project's history.
+
+```
+$ make build && ./bin/tdo --version
+v0.1.0
+$ git describe --tags
+v0.1.0
+```
+
+### Remaining: steps 7-8
+
+- **Step 7 / DoD 7** — the end-to-end install by download on a machine with **no `go` on
+  `PATH`**, reaching a working keybind purely from the release asset, with the checksum path
+  exercised against the real `checksums.txt`. This is now possible for the first time (the
+  asset exists and `latest` resolves) and it is the user this whole release is for.
+- **Step 8 / DoD 8** — walk the README's install instructions verbatim and fix whatever does
+  not work as written.
+
