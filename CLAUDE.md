@@ -320,6 +320,18 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   close key silently does nothing in the input row — and `alt+<rune>` inserted a bare letter,
   which it had been doing all along). Both directions are mutation-proven; the plan's literal
   `msg.Type != tea.KeyRunes` fails the space leg.
+- **Which key NAMES tmux accepts is version-dependent, so a case built on one must probe, not
+  version-sniff.** `'`, `"`, `M-'` and `C-"` all bind on 3.7b; ubuntu's 3.4 rejects at least one,
+  which turned `closekey-6-quote-in-key-*` red in CI for a reason that was not the plugin's.
+  `test/plugin_install_test.sh`'s `tmux_can_bind` asks the running tmux by binding into a private
+  `tdo-keyprobe` table on its own server — a `tmux -V` comparison would encode today's guess about
+  which release changed the parser and go stale silently. Three properties make the skip safe, and
+  all three are mutation-proven: it **fails open** (no usable probe server ⇒ "bindable", so cases
+  run unguarded rather than silently vanishing); a key tmux *really* rejects, with the probe forced
+  to say yes, **fails** the case rather than skipping it; and `closekey-6-quote-key-coverage` fails
+  the suite outright if zero keys were bindable, because a group that skipped everything reports
+  success for no coverage. That last guard is the one worth copying: **any per-item skip needs a
+  companion assertion that not every item skipped.**
 - **tmux re-quotes a key name when it prints it, and the spelling depends on the key.** `t`
   comes back bare, `'` as `\'`, `M-'` as `"M-'"`, `C-"` as `'C-"'`. So `list-keys | awk '$4 == k'`
   answers "not bound" for a key sitting right there — an assertion of zero passes, which is the

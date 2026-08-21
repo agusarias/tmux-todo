@@ -204,6 +204,59 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ------------------------------------------------------- key-name bindability
+#
+# Whether tmux accepts a given *key name* is a property of the tmux running the
+# suite, not of the plugin. ubuntu-latest's 3.4 rejects at least one of the
+# quote-containing names that 3.7b binds happily, which made
+# closekey-6-quote-in-key-* red in CI for a reason that has nothing to do with
+# the code under test.
+#
+# So ask, rather than guess. A `tmux -V` comparison would encode today's belief
+# about which release changed the key parser and would go stale silently; a real
+# bind-key answers the actual question on whatever tmux is present, including
+# ones that do not exist yet.
+#
+# The probe gets its OWN server and its OWN key table. Nothing else touches
+# `tdo-keyprobe`, and the bindings it makes are `display-message` rather than
+# `display-popup`, so even a leaked one could not be counted by
+# count_plugin_keybinds_for. It is a separate server rather than each case's own
+# so that one definition answers both the header line and the loop below — a
+# header that could disagree with what actually ran would be worse than no
+# header.
+QUOTE_KEY_SPECS=("apostrophe:'" 'quote:"' "alt-apostrophe:M-'" 'ctrl-quote:C-"')
+
+KEYPROBE_SOCK="tdo-keyprobe-$$"
+KEYPROBE_OK=''
+if "$REAL_TMUX" -L "$KEYPROBE_SOCK" -f /dev/null new-session -d -s probe >/dev/null 2>&1; then
+    KEYPROBE_OK=yes
+    SOCKETS+=("$KEYPROBE_SOCK")
+fi
+
+# tmux_can_bind <key> — 0 if this tmux accepts the key name.
+#
+# **Fails OPEN.** With no usable probe server the answer is "bindable", so every
+# case runs exactly as it did before this guard existed. That direction is
+# deliberate: an undetermined probe must never be a reason to assert less, and a
+# case that runs either passes or reports a real failure. Failing closed would
+# turn a broken probe into a silently empty suite.
+tmux_can_bind() {
+    [ -n "$KEYPROBE_OK" ] || return 0
+    "$REAL_TMUX" -L "$KEYPROBE_SOCK" bind-key -T tdo-keyprobe "$1" display-message ok >/dev/null 2>&1 || return 1
+    "$REAL_TMUX" -L "$KEYPROBE_SOCK" unbind-key -T tdo-keyprobe "$1" >/dev/null 2>&1
+    return 0
+}
+
+# bindable_quote_keys — the subset of QUOTE_KEY_SPECS' keys this tmux accepts,
+# space separated, for the header line.
+bindable_quote_keys() {
+    local spec out=''
+    for spec in "${QUOTE_KEY_SPECS[@]}"; do
+        tmux_can_bind "${spec#*:}" && out="$out ${spec#*:}"
+    done
+    printf '%s' "${out# }"
+}
+
 echo "plugin script : $PLUGIN_SCRIPT"
 echo "tmux          : $REAL_TMUX ($("$REAL_TMUX" -V))"
 echo "bash          : $REAL_BASH ($("$REAL_BASH" --version | head -1))"
@@ -217,6 +270,13 @@ if [ -n "$CAN_SEE_MSGS" ]; then
     echo "show-messages : observable"
 else
     echo "show-messages : NOT observable on this tmux; message-log assertions skip"
+fi
+if [ -z "$KEYPROBE_OK" ]; then
+    echo "quote keys    : probe server unavailable; every quote-key case runs unguarded"
+else
+    _bindable=$(bindable_quote_keys)
+    echo "quote keys    : this tmux binds [${_bindable:-none}]; unbindable names skip"
+    unset _bindable
 fi
 
 # ---------------------------------------------------------------- assertions
@@ -1020,10 +1080,28 @@ case_end
 # The key names here are ones tmux actually accepts. The first attempt used
 # "C-l'x", which tmux rejects with "unknown key" — but so does "C-lx", so the
 # quote had nothing to do with it and the case was testing an invalid key name
-# rather than a quoted one. `'`, `"`, `M-'` and `C-"` all bind for real.
-for spec in "apostrophe:'" 'quote:"' "alt-apostrophe:M-'" 'ctrl-quote:C-"'; do
+# rather than a quoted one. `'`, `"`, `M-'` and `C-"` all bind for real on 3.7b.
+#
+# ...but not on every tmux: 3.4 rejects at least one of them as a key NAME, and
+# that is what made this group red in CI. So each key is probed first and the
+# case skips only when tmux itself refuses the name.
+#
+# The skip is deliberately the narrowest thing that closes the CI failure. "tmux
+# will not bind this name" is the only excuse; "the plugin failed to bind it" is
+# the bug this group exists for and still fails. Both directions are
+# mutation-proven — see the task's Evidence section — because a skip is the one
+# change that can make a suite pass by asking less.
+quote_keys_ran=0
+for spec in "${QUOTE_KEY_SPECS[@]}"; do
     label=${spec%%:*}
     badkey=${spec#*:}
+    if ! tmux_can_bind "$badkey"; then
+        printf '\n== closekey-6-quote-in-key-%s\n' "$label"
+        printf '    SKIP this tmux cannot bind the key name "%s" at all, so the plugin\n' "$badkey"
+        printf '         cannot be asked to bind it. Not a plugin failure.\n'
+        continue
+    fi
+    quote_keys_ran=$((quote_keys_ran + 1))
     case_start "closekey-6-quote-in-key-$label"
     stub "$PATHDIR/tdo"
     tm set-option -g @todo-key-table root >/dev/null 2>&1
@@ -1042,10 +1120,31 @@ for spec in "apostrophe:'" 'quote:"' "alt-apostrophe:M-'" 'ctrl-quote:C-"'; do
     case_end
 done
 
+# The guard on the guard. If the probe skipped every key, this group asserted
+# nothing at all — and a suite that reports success for zero coverage is worse
+# than the red build this fix replaces. There is no tmux where this should fire:
+# `'` is an ordinary key name.
+printf '\n== closekey-6-quote-key-coverage\n'
+if [ "$quote_keys_ran" -eq 0 ]; then
+    bad "quote-key coverage was empty: this tmux bound none of the quote key names, so the whole group was vacuous"
+else
+    ok "$quote_keys_ran of ${#QUOTE_KEY_SPECS[@]} quote key names were bindable and actually ran"
+fi
+
 # The other half of DoD 3: a tmux server *started* with such a config comes up.
 # The cases above set the option on a running server; this one puts it in the
 # config file the server reads at startup, which is how a real user would hit it,
 # and the failure mode there is a server that never comes up at all.
+#
+# Probed like the loop above, and for the same reason: its key is `'`, so a tmux
+# that cannot bind that name would fail this case for a reason that is not the
+# plugin's. It is one key rather than a list, so a plain `if` rather than a
+# counter — and no vacuity guard is needed, because a skip here is visible as a
+# missing case in a group of one.
+if ! tmux_can_bind "'"; then
+    printf '\n== closekey-7-server-starts-with-a-quoted-key\n'
+    printf '    SKIP this tmux cannot bind the key name "%s" at all. Not a plugin failure.\n' "'"
+else
 case_start closekey-7-server-starts-with-a-quoted-key
 stub "$PATHDIR/tdo"
 conf=$CASEDIR/tmux.conf
@@ -1068,6 +1167,7 @@ else
 fi
 "$REAL_TMUX" -L "$sock2" kill-server >/dev/null 2>&1
 case_end
+fi
 
 # nested_client — manufactures an attached client on this case's server and
 # echoes its name, or nothing.
