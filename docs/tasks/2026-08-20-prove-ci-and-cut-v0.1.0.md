@@ -245,10 +245,79 @@ show-messages : NOT observable on this tmux; message-log assertions skip
   provenance, and needed no portability fix at all — the sha256 tool resolution and the
   `uname`-computed host asset both held.
 
-### Remaining: steps 4-8
+### Steps 4-5 complete: the release workflow is proven, and the rehearsal is gone (DoD 4, 5)
 
-Not started. The release workflow has still never run, no tag exists, and install-by-download
-has only been proven against a local fixture. **Open judgment call for step 6**, flagged in the
-Plan and now due: `session-renamed-hook-targets-wrong-session` is `in-progress` and unfixed, so
-cutting `v0.1.0` today would ship a release whose rename-following silently does nothing.
+**A footgun was closed before any tag existed.** `release.yml` called `gh release create` with
+no `--prerelease`, and GitHub's "latest" is the most recent release that is *not* a prerelease
+— while `tmux-todo.tmux` installs from `/releases/latest/download/<asset>`. So cutting any
+release candidate would silently have become the binary every installed plugin downloads at its
+next tmux server start. Latent rather than live (no release existed;
+`/releases/latest/download/tdo-darwin-arm64` returned **HTTP 404**), but permanent. Fixed in
+`c0cd1fe`: semver's own rule decides — a hyphen after the version core means pre-release —
+exercised across `v0.1.0`/`v2.3.4` (final) and `v0.0.1-test`/`v1.0.0-rc.1` (prerelease).
+Closing it first is what made the rehearsal below safe.
 
+**Release run `32487438564`: green on its first attempt**, unlike CI's. All five assets, with
+the contract names exactly as `release.yml`'s header pins them:
+
+```
+checksums.txt        330 bytes
+tdo-darwin-amd64   7877472
+tdo-darwin-arm64   7744898
+tdo-linux-amd64    7753912
+tdo-linux-arm64    7667896
+```
+
+**The `--prerelease` safeguard demonstrated rather than asserted.** With the throwaway release
+published, `/releases/latest/download/tdo-darwin-arm64` **still returned HTTP 404** — the
+release did not become "latest", which is the entire behaviour the fix exists for.
+`isPrerelease` is `true`.
+
+**One asset downloaded and verified by hand**, off the release page:
+
+```
+published: 8f613a14e16ef7bfab628db8e780222543022e04548fad66e0f80cd57ce6ed89
+computed : 8f613a14e16ef7bfab628db8e780222543022e04548fad66e0f80cd57ce6ed89   MATCH
+
+$ ./tdo-darwin-arm64 --version
+v0.0.1-test
+$ ./tdo-darwin-arm64 doctor --db <throwaway>
+tdo      v0.0.1-test
+runtime  go1.25.0 darwin/arm64
+schema   2 (latest 2)
+journal  wal
+ok
+$ otool -L ./tdo-darwin-arm64
+  /usr/lib/libSystem.B.dylib
+  /usr/lib/libresolv.9.dylib          # no libsqlite3
+```
+
+So the ldflags stamp, the migrations, and `CGO_ENABLED=0` all hold on a binary that came off
+GitHub rather than out of a local build. `runtime go1.25.0` also confirms
+`go-version-file: go.mod` did what it claims: CI built on the exact floor the README promises.
+
+*Method note:* the first verification attempt printed `MATCH` while both sides were **empty** —
+the download had silently failed and `"" = ""` compared equal. The comparison now requires both
+values to be non-empty before claiming a match. Recorded because it is the same vacuous-guard
+trap this project has caught four times in its own tests, written here by the curator.
+
+**Step 5 — the rehearsal is fully removed.** `gh release delete --cleanup-tag` took the release
+and the remote tag, and the local tag with it:
+
+```
+before:  git describe -> v0.0.1-test
+after:   local tags [] · remote tags [] · releases []
+         git describe -> fatal: No names found, cannot describe anything
+```
+
+Back to the pre-tag state, so nothing derives a version from a test tag. That mattered enough
+to be its own DoD item: a lingering `v0.0.1-test` would have made every later `git describe`
+descend from it.
+
+### Remaining: steps 6-8
+
+The release machinery is now proven end to end; what is left is the real tag and the install
+check. **Step 6 is a product decision, not a technical one**, and it is the open item:
+`session-renamed-hook-targets-wrong-session` is still `in-progress`, so `v0.1.0` today would
+ship a release whose rename-following silently does nothing. Either the fix lands first, or the
+release notes say so plainly and point at the all-tasks view's re-home as the workaround.
