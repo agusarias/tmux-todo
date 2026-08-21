@@ -1,6 +1,6 @@
 # The session-renamed Hook Resolves The Wrong Session
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -432,3 +432,29 @@ script echoed the installed hook.
    inherits the *server's* environment; `$TMUX_PANE` is absent from a pane's initial command,
    and send-keys needs a readiness handshake); the lucky-fallback vacuity trap; and
    `internal/scope`'s three ways of asking tmux about a session.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All seven DoD items check out, and the
+curator re-verified on `main` rather than trusting the Evidence section: `make
+lint` clean, `go test ./...` green across all five packages, and `make
+test-plugin` **188 passed, 0 failed** (the brief recorded 140; the close-popup
+task landed the difference).
+
+**What makes this close-out different from the one that let the bug ship.** The
+original task's Checkpoint 2 approved evidence that exercised the *command*, by
+hand, in a pane — and a pane has a client, so the shipped bug could not appear
+there. The guard accepted this time asserts its own precondition for failure
+before the rename (`a client-less child would resolve some OTHER session, so
+this case can fail`) and is mutation-proven in both suites, including the
+destructive direction: the mutant rewrites a bystander's tasks and its map row.
+That precondition line is the part worth copying to any future harness here.
+
+**Recorded, not fixed:** `session-renamed` opens the store before it resolves
+which session it is, so a hook firing on a machine that has never run `tdo`
+creates an empty database. Store changes were out of scope for this task and the
+side effect is harmless; the user declined to file it as its own task.
+
+**Pushing stays with the user.** `main` carries this merge (174f829) unpushed,
+along with the rest of the queue's merges.
+
