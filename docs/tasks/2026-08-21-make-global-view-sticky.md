@@ -1,7 +1,7 @@
 # The All-Tasks View Is Sticky Across Popup Sessions
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-sticky-view
 
 ## Goal
 Close the popup while the all-tasks view (`g`) is up, and the next popup opens in it. Close it
