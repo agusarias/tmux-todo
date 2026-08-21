@@ -161,6 +161,13 @@ func runTUI(args []string, stderr io.Writer) int {
 		// alongside Resolve's display-message), which is the price of the
 		// all-tasks view's liveness label being right when the popup opens.
 		LiveSessions: e.resolver.LiveSessions(),
+		// The key that opened the popup, so pressing it again closes it. The
+		// plugin puts @todo-key in the environment (display-popup -e) rather than
+		// tdo asking tmux, which would be a second round-trip on the hot path and
+		// would still be wrong for a hand-written bind. Unset — a hand-run
+		// `tdo tui`, or a prefix-table install where the chord cannot reach the
+		// popup — translates to "", meaning no close key.
+		CloseKey: popupKey(os.Getenv(popupKeyEnv)),
 	}
 	jump, err := runTUIProgram(cfg)
 	if err != nil {

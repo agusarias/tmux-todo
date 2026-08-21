@@ -50,6 +50,16 @@ type wiringFixture struct {
 	// sticky is the preference seeded into the state dir before the run, or ""
 	// for none.
 	sticky task.ScopeKind
+	// popupKey is the raw @todo-key the plugin would have put in the popup's
+	// environment, or "" for "no TDO_POPUP_KEY at all".
+	//
+	// It is a tmux spelling ("C-l"), not a Bubble Tea one, so the assertion
+	// covers the translation as well as the plumbing — and it is deliberately
+	// something other than the empty string the real environment has, because
+	// `os.Getenv` returns "" on any CI runner and an assertion against "" would
+	// pass with the wiring deleted. That is the vacuous-environment-guard trap
+	// CLAUDE.md records for $TMUX.
+	popupKey string
 
 	// Filled in by install.
 	dir       string
@@ -86,6 +96,12 @@ func (f *wiringFixture) install(t *testing.T) *wiringFixture {
 		unsetenv(t, "TMUX")
 	} else {
 		t.Setenv("TMUX", "/tmp/fake-tmux,1,0")
+	}
+
+	if f.popupKey == "" {
+		unsetenv(t, popupKeyEnv)
+	} else {
+		t.Setenv(popupKeyEnv, f.popupKey)
 	}
 
 	if f.sticky != "" {
@@ -292,6 +308,29 @@ var wiringChecks = map[string]wiringCheck{
 	},
 
 	"Now": nilIsCorrect("the popup defaults it to time.Now; only tests inject a clock"),
+
+	// The close key comes out of the popup's environment and through the
+	// translation, so this asserts both halves at once: the fixture exports a
+	// tmux spelling and the Config must carry the Bubble Tea one.
+	//
+	// The empty case is asserted by TestTUIConfigWiringWithNoPopupKey rather than
+	// here, because "" is what a deleted wiring line also produces.
+	"CloseKey": func(t *testing.T, _ string, cfg tui.Config, f *wiringFixture) {
+		want := popupKey(f.popupKey)
+		if want == "" {
+			t.Fatalf("the fixture's popupKey %q does not translate, so this assertion could"+
+				" not fail — pick one that does", f.popupKey)
+		}
+		if cfg.CloseKey != want {
+			t.Errorf("CloseKey = %q, want %q from %s=%q", cfg.CloseKey, want, popupKeyEnv, f.popupKey)
+		}
+		// ...and it must not be the raw tmux name: that would never match a key
+		// the popup sees, so the popup would silently never close.
+		if cfg.CloseKey == f.popupKey {
+			t.Errorf("CloseKey = %q, the untranslated tmux name — Update compares against"+
+				" Bubble Tea key strings, so this would never fire", cfg.CloseKey)
+		}
+	},
 }
 
 // TestEveryTUIConfigFieldIsAsserted is the guard that keeps wiringChecks
@@ -328,9 +367,10 @@ func TestEveryTUIConfigFieldIsAsserted(t *testing.T) {
 // built, checked against the environment the fixture set up.
 func TestTUIConfigWiring(t *testing.T) {
 	f := (&wiringFixture{
-		session: "work",
-		live:    []string{"work", "spare"},
-		sticky:  task.ScopeDir,
+		session:  "work",
+		live:     []string{"work", "spare"},
+		sticky:   task.ScopeDir,
+		popupKey: "C-l",
 	}).install(t)
 
 	cfg := runTUIAndCaptureConfig(t, f)
@@ -408,5 +448,35 @@ func unsetenv(t *testing.T, key string) {
 	t.Setenv(key, "")
 	if err := os.Unsetenv(key); err != nil {
 		t.Fatalf("unset %s: %v", key, err)
+	}
+}
+
+// TestTUIConfigWiringWithNoPopupKey is DoD 8 at the wiring level: a hand-run
+// `tdo tui`, or a prefix-table install, sets no TDO_POPUP_KEY, and the popup must
+// get no close key rather than some default.
+//
+// Its companion in internal/tui proves "" is inert; this one proves runTUI
+// actually produces "" instead of, say, the literal env-var name.
+func TestTUIConfigWiringWithNoPopupKey(t *testing.T) {
+	f := (&wiringFixture{session: "work", live: []string{"work"}}).install(t)
+
+	cfg := runTUIAndCaptureConfig(t, f)
+
+	if cfg.CloseKey != "" {
+		t.Errorf("CloseKey = %q with no %s in the environment, want empty", cfg.CloseKey, popupKeyEnv)
+	}
+}
+
+// TestTUIConfigWiringIgnoresAnUntranslatableKey — a @todo-key the translation
+// does not understand must reach the popup as "" rather than as itself. A raw
+// tmux name in CloseKey would be a key that never fires; worse, a partially
+// translated one could shadow a real binding.
+func TestTUIConfigWiringIgnoresAnUntranslatableKey(t *testing.T) {
+	f := (&wiringFixture{session: "work", live: []string{"work"}, popupKey: "F13"}).install(t)
+
+	cfg := runTUIAndCaptureConfig(t, f)
+
+	if cfg.CloseKey != "" {
+		t.Errorf("CloseKey = %q for an unsupported key name, want empty", cfg.CloseKey)
 	}
 }

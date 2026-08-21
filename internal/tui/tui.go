@@ -114,6 +114,26 @@ type Config struct {
 	// holds no clock. An injected clock keeps that note's intent — the model is
 	// still a pure function of its inputs.
 	Now func() time.Time
+	// CloseKey is a Bubble Tea key string ("ctrl+l") that closes the popup, or
+	// "" for none. It is the key that *opened* it: the plugin passes @todo-key
+	// into the popup's environment and internal/cli translates it, because this
+	// package must not read an env var or ask tmux anything.
+	//
+	// "" is the normal state for a hand-run `tdo tui` and for a prefix-table
+	// install, and it must stay inert rather than defaulting to something:
+	// guessing a close key would shadow a popup binding the user did not ask to
+	// lose. The precedence rule is the same one — the close check runs *after*
+	// each mode's own key switch, so a CloseKey that collides with `a` or `d`
+	// keeps doing its old job and simply does not close.
+	CloseKey string
+}
+
+// closesOn reports whether msg is the configured close key.
+//
+// The empty check is load-bearing rather than defensive: without it every
+// unhandled key would match "" and quit the popup.
+func (c Config) closesOn(msg tea.KeyMsg) bool {
+	return c.CloseKey != "" && msg.String() == c.CloseKey
 }
 
 // now reads the injected clock, falling back to the real one.
@@ -486,6 +506,12 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		return m.toggleFilter(task.ScopeGlobal)
 	}
+	// After the switch, never inside it: every binding above wins over the close
+	// key, so a @todo-key of `a` still opens the input row. That precedence is
+	// structural here rather than a rule each case has to remember.
+	if m.cfg.closesOn(msg) {
+		return m.quit()
+	}
 	return m, nil
 }
 
@@ -514,6 +540,13 @@ func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "?", "esc", "q", "ctrl+c":
 		m.mode = modeNormal
 		return m, nil
+	}
+	// The close key quits outright from here rather than dismissing the overlay:
+	// "the same key always closes the popup" is the whole feature, and a user who
+	// pressed it wants out, not one screen back. `q` still dismisses, because the
+	// switch above runs first.
+	if m.cfg.closesOn(msg) {
+		return m.quit()
 	}
 	return m, nil
 }

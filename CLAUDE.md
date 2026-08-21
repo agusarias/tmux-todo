@@ -41,7 +41,8 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   delete queue (`delete.go`). Both are pure model state; the only I/O either does is a
   store command returned from `Update`.
 - `tmux-todo.tmux` — the TPM plugin entry point (bash 3.2; macOS has no newer one).
-  Resolves the binary, installs the keybind and the rename hook. tmux sources it on
+  Resolves the binary, installs the keybind (with `-e TDO_POPUP_KEY` on root-table installs, so
+  the popup can close on the key that opened it) and the rename hook. tmux sources it on
   **every server start**, so the resolved path stays cheap. `test/plugin_install_test.sh`
   drives it against private `tmux -L` servers; `make test-plugin` runs that.
 - `.github/workflows/ci.yml` — three jobs: `go` on ubuntu **and** macOS (which *asserts*
@@ -262,6 +263,42 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   a canary meant to observe the *child's* view must contain no formats: put it in a script file
   and pass only plain arguments, or it silently reports the server's view and reads as though
   the child agreed.
+- **The popup closes on the key that opened it, and the key travels
+  `@todo-key` -> `display-popup -e TDO_POPUP_KEY` -> `tui.Config.CloseKey` -> `Update`.** tmux
+  cannot do this itself: while a `display-popup` has focus the outer client's binding never
+  fires and there is no popup key table to bind a closer in, so only `tdo` can act on the second
+  press. An env var rather than `tdo` asking tmux, because the popup's cold start is the product
+  and a second `display-message` would spend ~5ms of it on every open.
+  **Only for `@todo-key-table root`.** With a prefix table the opening chord is prefix+key, the
+  prefix cannot reach a focused popup, and a bare-key closer is a *different* key from the
+  opener. Prefix installs get a byte-identical bind body to before.
+  **Existing popup bindings win**: the close check runs *after* each mode's key switch, so a
+  `@todo-key` of `a` or `d` keeps its job and simply does not close. That is structural rather
+  than a rule each call site remembers.
+- **Never hand-write a Bubble Tea key string; derive it from `tea.KeyMsg.String()`.** The value
+  has to equal what `Update` compares against, and the spellings are not guessable: tmux's
+  `C-Space` is Bubble Tea's **`ctrl+@`** (the terminal sends NUL), and `C-i`/`C-m` come back as
+  `tab`/`enter`. `internal/cli/popupkey.go` therefore builds every result by constructing the
+  KeyMsg and asking it, and ctrl+letter is computed as `tea.KeyType(c-'a'+1)` rather than
+  tabulated — which gets those collisions right for free. An unrecognised name yields `""`,
+  meaning no close key: a *wrong* key would either never fire or shadow a binding, and "" is
+  what every install had before the feature existed.
+- **`tea.KeySpace` is not `tea.KeyRunes`, and an Alt-modified rune IS `KeyRunes`.** Both bite
+  the same predicate. `internal/tui/field.go`'s `isTextKey` is the one definition of "the input
+  row would type this": it must include `KeySpace` (or a `@todo-key` of `Space` quits the popup
+  instead of inserting a space) and must exclude `msg.Alt` (or `alt+t` counts as text, so an alt
+  close key silently does nothing in the input row — and `alt+<rune>` inserted a bare letter,
+  which it had been doing all along). Both directions are mutation-proven; the plan's literal
+  `msg.Type != tea.KeyRunes` fails the space leg.
+- **tmux re-quotes a key name when it prints it, and the spelling depends on the key.** `t`
+  comes back bare, `'` as `\'`, `M-'` as `"M-'"`, `C-"` as `'C-"'`. So `list-keys | awk '$4 == k'`
+  answers "not bound" for a key sitting right there — an assertion of zero passes, which is the
+  wrong direction. `test/plugin_install_test.sh`'s `KEY_AWK` unquotes field 4 first; it is a
+  no-op for bare keys.
+  Related: **tmux rejects a malformed key name outright** (`unknown key: C-l'x`) — but it rejects
+  `C-lx` too, so the quote is not what makes it invalid. `'`, `"`, `M-'` and `C-"` are all real,
+  bindable keys. A test meaning to cover "a quote in the key name" must use one of those, or it
+  is testing an invalid key name instead.
 - **`set-hook -g` replaces; `set-hook -ga` appends.** A plugin must append or it silently
   eats the user's own `session-renamed` hook. The cost is that re-running the install
   stacks duplicate copies (`show-hooks -g` shows `session-renamed[0]`, `[1]`, …); the hook
@@ -322,13 +359,21 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   (harmlessly, by luck: the private server's low session ids were absent from the real map).
   Set it when the server *starts* — `case_start` takes `VAR=VALUE` arguments for exactly this —
   and assert `show-environment -g XDG_DATA_HOME` afterwards. Safety requirement, not tidiness.
-- **`tmux` sets `$TMUX_PANE` for a pane's interactive shell but NOT for a pane's initial
-  command.** So `new-session -d -s alpha "tdo add --session x"` is in the same client-less
-  position as a hook and files the task under the *wrong* session, while `send-keys` into the
-  shell resolves correctly. Seeding a session-scoped task in the harness therefore goes through
-  `send-keys` — and needs a readiness handshake first: keystrokes sent before the shell starts
-  reading are buffered, so a poll-and-resend loop made a slow shell rc run all four queued
-  commands and seeded four copies of the same task.
+- **`$TMUX_PANE` IS set for a pane's initial command**, so
+  `new-session -d -s alpha "tdo add --session x; exec sleep 300"` files the task under alpha
+  correctly and is the deterministic way to seed a session-scoped task in the harness — no
+  shell, no keystrokes, nothing to race. (`exec sleep` is load-bearing: a pane whose command
+  exits takes the session with it.)
+  **CLAUDE.md claimed the opposite for one commit.** The probe behind that claim ran
+  `printenv TMUX TMUX_PANE`, which reported only the first variable, so `TMUX_PANE` looked
+  absent; `printenv TMUX_PANE` alone prints `%1`. Ask for one variable per probe, or the
+  absence you observe is the tool's and not the environment's.
+- **Driving an interactive shell with `send-keys` needs a readiness handshake, and is still
+  the flakier choice.** Keystrokes sent before the shell reads them are buffered, so a
+  poll-and-resend loop made a slow rc run all four queued commands and seed four copies of one
+  task; the handshake that fixed it then timed out under load, because the rc files are slow.
+  Prefer a pane command over `send-keys` whenever the thing being run does not need a
+  line editor.
 - **`python3 -m http.server` needs `-u` when its output is redirected.** The
   "Serving HTTP on 127.0.0.1 port NNNNN" line is buffered otherwise, so a harness that
   reads the port out of the log never finds one. That does not fail: `serve_fixture` fell

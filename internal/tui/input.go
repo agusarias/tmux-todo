@@ -100,6 +100,16 @@ func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.submitInput()
 	}
 
+	// The close key quits from the input row too — a half-typed line is worth
+	// less than "this key always closes" — but not when it is a key the row would
+	// treat as text. In the input row typing *is* the existing action, which is
+	// the same precedence rule normal mode applies, so isTextKey is asked rather
+	// than the key types being re-enumerated here: a @todo-key of Space must
+	// insert a space, and tea.KeySpace is not tea.KeyRunes.
+	if !isTextKey(msg) && m.cfg.closesOn(msg) {
+		return m.quit()
+	}
+
 	m.input.handleKey(msg)
 	// Typing answers the complaint.
 	if m.inputHint != "" && strings.TrimSpace(m.input.value()) != "" {
