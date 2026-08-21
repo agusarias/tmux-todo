@@ -1,6 +1,6 @@
 # The All-Tasks View Is Sticky Across Popup Sessions
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -328,3 +328,36 @@ $ git diff --stat internal/cli/testdata/
   mid-write; a power loss immediately after the rename could still lose it. Consistent with the
   existing `default-scope` file, and a preference is the kind of thing the design already says
   the user can lose without losing anything of theirs.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All ten DoD items check out, re-verified on `main`:
+`make lint` clean, `go test ./...` green, `make test-plugin` **213 passed, 0 failed**, and the
+`list --json` golden untouched.
+
+**Independently verified, because it was the constraint most likely to be quietly violated:** the
+developer's real state dir holds only `default-scope` — no `default-view` — so the suite did not
+write a real preference. The harness's assertion that the *server's* environment carries the
+sandbox `XDG_STATE_HOME` is what earns that, since a `display-popup` child inherits the server's
+environment and would otherwise have rewritten the user's own file on every run.
+
+**The plan's named hazard is caught twice over.** Moving the persist below `quit()`'s empty-queue
+early return fails the unit tests *and* the end-to-end case. Since an empty delete queue is the
+common path, that bug would have shipped as "the view is remembered only if you happened to press
+`d`" — which is why the persist being the first statement in `quit()` is the design and not a
+detail.
+
+**Two positive controls worth copying.** The 10-case corrupt-file table ends with a file holding
+`all` that must read *true*, so the table cannot pass vacuously; and `TestTUIDoesNotImportScope`
+carries a sentinel import that must be found, so a typo in the forbidden import path cannot make
+the guard pass forever — plus it fatals if it parsed zero files. Both are answers to the failure
+mode this repo keeps meeting: a guard that is green because it is looking at nothing.
+
+**Limits accepted as stated:** two popups open at once means last quit wins (no ordering to
+assert, only a second write); a popup killed uncleanly keeps the previous preference, the same way
+queued deletes are lost, both failing towards not changing the user's state; the preference is
+global rather than per-context, per the brief; and the write is a temp-file-plus-rename without an
+fsync, consistent with the neighbouring `default-scope` file.
+
+**Included in `v0.1.0`.**
+
