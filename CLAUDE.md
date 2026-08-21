@@ -52,8 +52,10 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   darwin/{arm64,amd64} and linux/{amd64,arm64}, verifies the native one, writes
   `checksums.txt` and publishes with `gh`. **Asset names are a contract the plugin
   computes** — renaming one breaks every installed plugin at its next server start.
-- `internal/cli` — stdlib `flag` with manual subcommand dispatch. Also owns the two
-  tmux-facing side jobs: refreshing the `session_id -> name` map on every resolve
+- `internal/cli` — stdlib `flag` with manual subcommand dispatch. `env.filter` is the single
+  place `list` and `count` turn a `selector` (`--scope` / `--session` / `--dir`, mutually
+  exclusive) into a `store.Filter`, so the two commands cannot disagree about what a flag means.
+  Also owns the two tmux-facing side jobs: refreshing the `session_id -> name` map on every resolve
   (`openEnv`) and the `session-renamed` subcommand the tmux hook calls.
 
 ## Decisions worth knowing
@@ -353,6 +355,37 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - **Resolution costs one `tmux display-message`** (~5ms of a ~5.7ms cold median),
   one call for both formats. If the popup ever needs those milliseconds back, the
   lever is tmux expanding `#{...}` straight into the `display-popup` command.
+- **A value-taking flag whose next token is another flag is REJECTED, not swallowed** —
+  `splitArgs` refuses it for every such flag (`--db`, `--scope`, `--session`, `--dir`), and the
+  escape is the `=` form. The guard lives there rather than per-command because the hazard is a
+  property of "this flag consumes the next token", which is the question `takesValue` already
+  answers. `--scope` was only ever safe by *accident*: `tdo list --scope --json` set the value
+  to `"--json"` and failed solely because that is not a valid scope kind. A **session or
+  directory name has no vocabulary**, so `tdo list --session --json` exited 0 with an empty
+  list and `--json` silently dropped — measured before the guard existed, and the reason it
+  exists. Consequence: `--session=-json` is how a value that starts with a dash is passed, and
+  that escape is tested in both directions, because a guard that traded a silent bug for a hard
+  block would be its own bug.
+- **`fs.String`'s pointer cannot tell "absent" from "present but empty"** — both read as `""`.
+  For a scope selector those are different questions: `tdo list --session=` is a query no task
+  can match, while no `--session` at all means "the active merged set", so conflating them
+  silently lists *here* in answer to a question about somewhere else. `newSelector` reads the
+  flags back through **`fs.Visit`**, which reports only what was actually given; the empty value
+  is then a usage error. Whenever a flag's zero value *means* something, `Visit` is the seam,
+  not the pointer — the same shape as `scope.Resolver`'s `TmuxEnv == ""` trap.
+- **`--session`/`--dir` on `list`/`count` ask about stored rows; `--scope` asks about here.**
+  So the named ones never consult tmux, never error, and answer an empty list with exit 0 — a
+  killed or renamed session is exactly the list worth asking for. Ruling A (an unavailable
+  `--scope` exits 1) is about the *current* context only, and conflating the two would put
+  Ruling A's failure in front of the query that most needs to succeed.
+  `--dir` normalises through **`scope.DirKey`, the same function `add` files with** — never a
+  reimplementation, because "absolute, cleaned, symlink-resolved, worktrees folded" is pinned by
+  tests over there and a second copy would drift, with the failure showing up as an empty list
+  rather than an error. `DirKey` lstats, so it fails on a deleted directory; `--dir` falls back
+  to a cleaned absolute path, which is exact unless a symlink was involved. That gap is real,
+  documented in the usage text, and **asserted** by
+  `TestListDirOfADeletedSymlinkedPathIsTheDocumentedGap` — a known limitation with no test
+  becomes a silent regression the day someone "improves" the fallback.
 - **stdlib `flag` stops at the first positional, and reordering around it needs
   the FlagSet itself.** `tdo add "text" --global` drops `--global` into
   `fs.Args()`, so it is silently ignored — a task filed to the wrong scope at exit
