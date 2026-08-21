@@ -128,24 +128,27 @@ func runSessionRenamed(args []string, stdout, stderr io.Writer) int {
 }
 
 // renamedSession works out which session to reconcile and what it is now called.
-// With a name it asks tmux for that session's id; without one it reads both from
-// the tmux environment, which is the session the hook fired for. Either way it
-// costs one subprocess.
+// With a name it asks tmux for that session's id; without one it reads the id out
+// of $TMUX and asks tmux for that session's name. Either way it costs one
+// subprocess.
+//
+// The no-argument form goes through scope.EnvSession and **must not** go through
+// scope.Resolve, which is what it used to do. Resolve asks tmux for the current
+// session, tmux answers that from the client, and the hook — a run-shell child —
+// has none, so tmux named an unrelated session and the rename silently stranded
+// the tasks. EnvSession reads $TMUX's own session field instead and targets it
+// explicitly. Anything it cannot parse is an error here rather than a fallback to
+// Resolve: falling back would restore exactly that bug, in exactly the path where
+// nobody is watching.
 func renamedSession(r scope.Resolver, args []string) (name, id string, err error) {
 	if len(args) == 1 {
 		name = args[0]
 		id, err = r.SessionID(name)
 		return name, id, err
 	}
-	resolved, err := r.Resolve()
+	name, id, err = r.EnvSession()
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("session-renamed: %w", err)
 	}
-	if resolved.Session == nil {
-		return "", "", fmt.Errorf("session-renamed: %w (not inside tmux, and no session name given)", scope.ErrUnavailable)
-	}
-	if resolved.SessionID == "" {
-		return "", "", errors.New("session-renamed: tmux reported no session id")
-	}
-	return resolved.Session.Key, resolved.SessionID, nil
+	return name, id, nil
 }

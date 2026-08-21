@@ -155,6 +155,27 @@ PY3=$(command -v python3 || true)
 # assertions add on top is that the tmux channel fired at all. So detect, and
 # skip loudly where it cannot be seen, rather than dropping the assertions
 # everywhere or failing on a tmux that cannot answer the question.
+# The rename-hook cases need the REAL binary, not a stub: what they assert is
+# what `tdo session-renamed` does about the session it was fired for, and a shell
+# stub has no opinion about that. Built once, into TMPROOT, from this checkout.
+#
+# Every other case in this file deliberately uses stubs — they assert on what the
+# *plugin script* installed, and a stub makes "which binary got resolved"
+# observable. These cases are the opposite: the plugin script is incidental and
+# the binary is the subject.
+TDO_BIN=''
+if [ "$GO_OK" = yes ]; then
+    _bin=$TMPROOT/real/tdo
+    mkdir -p "$TMPROOT/real"
+    if ( cd "$REPO_ROOT" && CGO_ENABLED=0 "$REAL_GO" build -o "$_bin" ./cmd/tdo ) 2>"$TMPROOT/real/build.log"; then
+        TDO_BIN=$_bin
+    else
+        printf 'WARN: could not build tdo for the rename-hook cases:\n%s\n' \
+            "$(cat "$TMPROOT/real/build.log")"
+    fi
+    unset _bin
+fi
+
 CAN_SEE_MSGS=''
 _msgsock="tdo-msgprobe-$$"
 if tmux -L "$_msgsock" new-session -d -s probe 2>/dev/null; then
@@ -191,6 +212,7 @@ echo "host asset    : ${HOST_ASSET:-<unmapped platform>}"
 echo "sha256 tool   : ${SHA_TOOL:-none}"
 echo "downloader    : curl=$(command -v curl || echo none) wget=$(command -v wget || echo none)"
 echo "fixture server: ${PY3:-none (fixtures fall back to file://)}"
+echo "real tdo      : ${TDO_BIN:-none (rename-hook cases skip)}"
 if [ -n "$CAN_SEE_MSGS" ]; then
     echo "show-messages : observable"
 else
@@ -230,13 +252,21 @@ assert_no_temp_leftover() { # bindir label
 
 # ---------------------------------------------------------------- case setup
 
-# case_start <name> — a private server, plus a sandbox PATH whose front holds:
+# case_start <name> [VAR=VALUE ...] — a private server, plus a sandbox PATH whose
+# front holds:
 #   tmux  : a shim pinning every call the script makes to this case's socket
 #   bash  : so the script's own #!/usr/bin/env bash shebang resolves
 # followed by the system tool dirs. `tdo` and `go` live in neither, so they are
 # reachable only when a case puts them there.
+#
+# Any VAR=VALUE arguments go into the environment of the *server*, and they have
+# to be set here rather than by a case afterwards: a run-shell child inherits the
+# server's environment, not a pane's and not the harness's, so XDG_DATA_HOME
+# exported anywhere later would leave a hook child opening the developer's real
+# database. See the rename-hook section.
 case_start() {
     CASE=$1
+    shift
     CASEDIR=$TMPROOT/$CASE
     # Opt-in knobs, reset per case: RELEASE_BASE points the download step at a
     # fixture, RUN_PATH replaces the sandbox PATH wholesale.
@@ -254,7 +284,7 @@ case_start() {
     ln -s "$REAL_BASH" "$PATHDIR/bash"
 
     SOCKETS+=("$SOCK")
-    "$REAL_TMUX" -L "$SOCK" -f /dev/null new-session -d -s harness >/dev/null 2>&1
+    env "$@" "$REAL_TMUX" -L "$SOCK" -f /dev/null new-session -d -s harness >/dev/null 2>&1
     printf '\n== %s\n' "$CASE"
 }
 
@@ -879,6 +909,286 @@ else
     bad "the user's hook did not fire after the install"
 fi
 case_end
+
+# ============================================================== rename hook
+
+# The section that exists because everything above it can pass while the shipped
+# hook does nothing.
+#
+# `tdo session-renamed` was proven once by typing it into a pane after a rename.
+# That proves nothing about the hook: a pane has a CLIENT, and tmux answers
+# "which session is current" from the client. A `run-shell` hook child has no
+# client, so tmux falls back to an unrelated session — the command then looked the
+# wrong id up in the map, missed, and exited 0 with the tasks stranded under the
+# old name. See
+# docs/tasks/2026-08-20-session-renamed-hook-targets-wrong-session.md.
+#
+# So these cases fire a REAL rename on a REAL server through the hook the plugin
+# script itself installed, and assert on the database afterwards. Three traps
+# shape how:
+#
+#   * The hook child inherits the tmux SERVER's environment — not a pane's, not
+#     this harness's. XDG_DATA_HOME therefore has to be set when the server is
+#     started (case_start takes it as an argument for exactly this), or the child
+#     opens the developer's real database. That is a safety requirement.
+#   * tmux expands #{...} inside a run-shell argument before sh sees it, so a
+#     probe containing a format silently reports the server's view and reads as
+#     though the child agreed. Nothing here interpolates a format into a hook.
+#   * A harness-side `tdo` read would record ITS OWN session into the map, since
+#     every command that resolves a scope refreshes id -> name. If the harness's
+#     real session id collided with a private server's, that write would clobber
+#     the row under test. Every read here goes through tdo_read, which unsets
+#     $TMUX so the read resolves no session at all.
+
+# tdo_read runs the real binary with no tmux context: no session resolved, so no
+# map row written, so the assertion cannot perturb what it is measuring.
+tdo_read() { env -u TMUX "$TDO_BIN" "$@"; }
+
+# scope_of <db> <task text> — "kind|key" for the task with that text, read
+# through `tdo list --json`, which is a published contract and so a fair thing to
+# parse. Splitting on "}" leaves the text and its nested scope object in one
+# chunk; task texts here contain no quote or regex metacharacter.
+scope_of() {
+    tdo_read list --db "$1" --scope=all --all --json 2>/dev/null |
+        tr '}' '\n' |
+        sed -n "s/.*\"text\":\"$2\",.*\"kind\":\"\([a-z]*\)\",\"key\":\"\([^\"]*\)\".*/\1|\2/p" |
+        tr '\n' ' ' | sed 's/ *$//'
+}
+
+# wait_scope <db> <text> <want> — poll until scope_of answers <want>, then echo
+# whatever it last said. `run-shell -b` is asynchronous, so the rename returns
+# before the hook child has finished; polling for the expected value keeps the
+# happy path fast and still reports the real answer on failure.
+#
+# It must only ever be used for the POSITIVE assertion. A bystander that must not
+# move is read once, after the positive one has settled — polling for "unchanged"
+# would pass instantly every time, including on a fix that moves it a moment
+# later.
+wait_scope() {
+    local i got=''
+    for i in $(seq 40); do
+        got=$(scope_of "$1" "$2")
+        [ "$got" = "$3" ] && break
+        sleep 0.25
+    done
+    printf '%s' "$got"
+}
+
+# seed_session_task <session> <text> — file a session-scoped task from INSIDE
+# that session's own INTERACTIVE shell, which is also how a user creates one.
+#
+# It has to be the interactive shell and not the pane's initial command: tmux
+# sets $TMUX_PANE only for the former, and $TMUX_PANE is what lets `tdo add
+# --session` resolve the right session without a client. A pane started as
+# `new-session -d -s alpha "tdo add --session x"` is in the same client-less
+# position as the hook and would seed the *wrong* session — which would make
+# these cases pass or fail for a reason that has nothing to do with the rename.
+#
+# The handshake is not decoration either. send-keys into a shell that has not yet
+# started reading gets buffered, so a first version of this polled for the task
+# and re-sent when it did not appear — and a slow shell rc made every one of the
+# queued commands eventually run, seeding four copies of the same task. Wait for
+# the shell to answer once; after that, one send is one command.
+seed_session_task() {
+    local i ready=$CASEDIR/ready-$1
+    rm -f "$ready"
+    tm send-keys -t "$1" "touch '$ready'" Enter
+    for i in $(seq 60); do
+        [ -e "$ready" ] && break
+        sleep 0.25
+    done
+    if [ ! -e "$ready" ]; then
+        return 1
+    fi
+    tm send-keys -t "$1" "$TDO_BIN add --session '$2'" Enter
+    for i in $(seq 60); do
+        [ -n "$(scope_of "$DB" "$2")" ] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+# clientless_session — the session name an UNTARGETED display-message resolves to
+# from a client-less child, which is the wrong answer the whole bug is made of.
+#
+# It is here as a PRECONDITION, not as a curiosity. The client-less fallback lands
+# on whichever session tmux considers most recent, and sometimes that IS the
+# session being renamed — on a two-session server it usually is. A rename case set
+# up that way passes with the bug fully present: proven, by running these cases
+# against the pre-fix binary, where rename-4 went green until it grew a decoy.
+# So every case asserts that the fallback names something else, and is therefore
+# known to be able to fail.
+#
+# The probe lives in a FILE. tmux expands #{...} in a run-shell argument before sh
+# sees it, so a format written inline would report the server's own view and read
+# as though the child had agreed with it.
+clientless_session() {
+    local probe=$CASEDIR/fallback-probe out=$CASEDIR/fallback-answer i
+    rm -f "$out"
+    printf '#!/bin/sh\ntmux display-message -p "#{session_name}" > "$1" 2>&1\n' >"$probe"
+    chmod +x "$probe"
+    tm run-shell -b "$probe $out" >/dev/null 2>&1
+    for i in $(seq 40); do
+        [ -s "$out" ] && break
+        sleep 0.25
+    done
+    tr -d '\n' <"$out" 2>/dev/null
+}
+
+# assert_fallback_is_not <session> <label> — the anti-vacuity guard above.
+assert_fallback_is_not() {
+    local got
+    got=$(clientless_session)
+    printf '    -- a client-less child resolves the current session as: %s\n' "${got:-<nothing>}"
+    if [ -z "$got" ]; then
+        bad "$2 (the fallback probe answered nothing, so the case is unproven)"
+    elif [ "$got" = "$1" ]; then
+        bad "$2 (the fallback also names '$1', so this case would pass with the bug present)"
+    else
+        ok "$2"
+    fi
+}
+
+# A hook child that writes anything makes tmux open a "[tmux]" window to show it.
+# That is the concrete cost the silent no-op paths exist to avoid, and it is
+# assertable: no such window means nothing was printed.
+assert_no_hook_output() { # label
+    local w
+    w=$(tm list-windows -a -F '#{window_name}' 2>/dev/null | grep -c '^\[tmux\]$')
+    if [ "$w" = 0 ]; then ok "$1"; else bad "$1 ($w [tmux] output window(s))"; fi
+}
+
+if [ -z "$TDO_BIN" ]; then
+    printf '\n== rename-hook cases SKIPPED: no usable go toolchain to build tdo with.\n'
+    printf '   These are the only cases that fire a real hook, so a green run\n'
+    printf '   without them says nothing about the rename path.\n'
+else
+
+# The case the bug lived in. One rename, through the plugin's own installed hook,
+# with a bystander session present the whole time.
+case_start rename-1-hook-moves-tasks \
+    XDG_DATA_HOME=$TMPROOT/rename-1-hook-moves-tasks/xdg \
+    XDG_STATE_HOME=$TMPROOT/rename-1-hook-moves-tasks/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+out=$(plugin_run)
+assert_eq 1 "$(count_tdo_hooks)" "the plugin installed its hook"
+# The safety check, not a convenience: without this the hook child opens the
+# developer's real database.
+assert_contains "$(tm show-environment -g XDG_DATA_HOME)" "$CASEDIR/xdg" \
+    "the SERVER's environment carries the sandbox XDG_DATA_HOME"
+
+tm new-session -d -s alpha >/dev/null 2>&1
+tm new-session -d -s bravo >/dev/null 2>&1
+if seed_session_task alpha 'alpha task' && seed_session_task bravo 'bravo task'; then
+    ok "seeded a session task in alpha and in bravo"
+else
+    bad "could not seed the session tasks (db: $DB)"
+fi
+printf '    -- before: alpha task %s | bravo task %s\n' \
+    "$(scope_of "$DB" 'alpha task')" "$(scope_of "$DB" 'bravo task')"
+assert_eq "session|alpha" "$(scope_of "$DB" 'alpha task')" "alpha's task is filed under alpha"
+assert_eq "session|bravo" "$(scope_of "$DB" 'bravo task')" "bravo's task is filed under bravo"
+
+assert_fallback_is_not alpha \
+    "a client-less child would resolve some OTHER session, so this case can fail"
+
+# THE rename. Nothing is interpolated into the hook; the child reads $TMUX.
+tm rename-session -t alpha alpha2 >/dev/null 2>&1
+got=$(wait_scope "$DB" 'alpha task' 'session|alpha2')
+printf '    -- after : alpha task %s | bravo task %s\n' \
+    "$got" "$(scope_of "$DB" 'bravo task')"
+assert_eq "session|alpha2" "$got" "the hook moved the renamed session's task"
+# The destructive-fix guard. Resolving the wrong session and *finding* it is
+# worse than today's no-op, because it rewrites somebody else's list.
+assert_eq "session|bravo" "$(scope_of "$DB" 'bravo task')" \
+    "the bystander session's task was left alone"
+assert_no_hook_output "the hook printed nothing"
+
+# ...and again, which is the only way to prove the map was refreshed: the second
+# rename can only find the old name if the first one wrote it back.
+tm rename-session -t alpha2 alpha3 >/dev/null 2>&1
+got=$(wait_scope "$DB" 'alpha task' 'session|alpha3')
+printf '    -- after second rename: alpha task %s\n' "$got"
+assert_eq "session|alpha3" "$got" "a second rename moves it again (the map was refreshed)"
+assert_eq "session|bravo" "$(scope_of "$DB" 'bravo task')" "the bystander is still untouched"
+case_end
+
+# A session tdo has never run in owns no tasks under any name. The hook fires,
+# finds nothing in the map, and must exit 0 without a word — it runs on every
+# rename in the user's tmux, so a chatty no-op would flash a window each time.
+case_start rename-2-unknown-session-is-a-silent-no-op \
+    XDG_DATA_HOME=$TMPROOT/rename-2-unknown-session-is-a-silent-no-op/xdg \
+    XDG_STATE_HOME=$TMPROOT/rename-2-unknown-session-is-a-silent-no-op/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+plugin_run >/dev/null
+tm new-session -d -s lonely >/dev/null 2>&1
+tm rename-session -t lonely lonely2 >/dev/null 2>&1
+sleep 1
+assert_no_hook_output "an unknown session renames silently"
+# A database file IS expected: session-renamed opens the store before it works
+# out which session it is, so the hook creates an empty one on a fresh machine.
+# What must be true is that it holds nothing.
+assert_file "$DB" "the hook opened a database (it opens the store before resolving)"
+assert_eq 0 "$(tdo_read count --db "$DB" --scope=all)" "and filed nothing in it"
+case_end
+
+# The same, with a map that exists but does not know this session — the "empty
+# map" and "unknown id" halves are different code paths, and only one of them
+# gets to skip opening the store.
+case_start rename-3-cold-map-is-a-silent-no-op \
+    XDG_DATA_HOME=$TMPROOT/rename-3-cold-map-is-a-silent-no-op/xdg \
+    XDG_STATE_HOME=$TMPROOT/rename-3-cold-map-is-a-silent-no-op/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+plugin_run >/dev/null
+mkdir -p "$(dirname "$DB")"
+tdo_read add --db "$DB" --global 'a global task' >/dev/null
+tm new-session -d -s lonely >/dev/null 2>&1
+tm rename-session -t lonely lonely2 >/dev/null 2>&1
+sleep 1
+assert_no_hook_output "a cold map renames silently"
+assert_eq "global|" "$(scope_of "$DB" 'a global task')" "the global task is still global, not re-filed"
+assert_eq 1 "$(tdo_read count --db "$DB" --scope=all)" "and the database still holds exactly its one task"
+case_end
+
+# The "already current" path, reached the only way a real hook can reach it: a
+# hook body that runs the command twice in one child, so the second call is
+# ordered strictly after the first rather than racing it. The first moves the
+# task; the second must find the map already correct and say nothing.
+#
+# The move assertion is what keeps this non-vacuous — if the first call no-ops,
+# the second one no-ops too and a silence-only assertion would pass.
+case_start rename-4-second-firing-is-a-silent-no-op \
+    XDG_DATA_HOME=$TMPROOT/rename-4-second-firing-is-a-silent-no-op/xdg \
+    XDG_STATE_HOME=$TMPROOT/rename-4-second-firing-is-a-silent-no-op/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+plugin_run >/dev/null
+tm set-hook -gu session-renamed >/dev/null 2>&1
+tm set-hook -ga session-renamed "run-shell -b '$PATHDIR/tdo session-renamed; $PATHDIR/tdo session-renamed'" >/dev/null 2>&1
+tm new-session -d -s delta >/dev/null 2>&1
+tm new-session -d -s decoy >/dev/null 2>&1
+if seed_session_task delta 'delta task' && seed_session_task decoy 'decoy task'; then
+    ok "seeded a session task in delta and in the decoy"
+else
+    bad "could not seed the session tasks"
+fi
+# The decoy is seeded LAST on purpose: it makes it, and not delta, the session a
+# client-less child resolves to. Without it this case passed against the pre-fix
+# binary.
+assert_fallback_is_not delta \
+    "a client-less child would resolve the decoy, so this case can fail"
+tm rename-session -t delta delta2 >/dev/null 2>&1
+got=$(wait_scope "$DB" 'delta task' 'session|delta2')
+printf '    -- after : delta task %s\n' "$got"
+assert_eq "session|delta2" "$got" "the first call in the hook moved the task"
+assert_eq "session|decoy" "$(scope_of "$DB" 'decoy task')" "the decoy's task was left alone"
+assert_no_hook_output "the second call found the map already current and said nothing"
+case_end
+
+fi
 
 # ============================================================= steady state
 

@@ -451,3 +451,142 @@ func contains(ss []string, want string) bool {
 	}
 	return false
 }
+
+// TestSessionRenamedHookIgnoresTheClientlessSession is the regression guard for
+// docs/tasks/2026-08-20-session-renamed-hook-targets-wrong-session.md, at the
+// level where the failure can be reproduced without a tmux server.
+//
+// The hook is a run-shell child, and a run-shell child has no client. tmux
+// resolves "the current session" from the client, so an untargeted
+// display-message in a hook answers with some *other* session — consistently, id
+// and name together. This fake reproduces that: the truth is $3/"alpha2" (the
+// session that was just renamed), while the untargeted query answers whatever
+// clientless says.
+//
+// The three legs are the three shapes the wrong answer takes, and the third is
+// the destructive one: today's bug is inert only because the wrong id usually
+// misses the map. When it hits, the command rewrites an unrelated session's
+// tasks — which is why every leg asserts on the bystander as well as on the
+// renamed session.
+//
+// This is a fake, so it cannot prove the shipped binary asks the targeted
+// question. The rename-hook cases in test/plugin_install_test.sh fire a real
+// hook on a real server for that; both are needed, and CLAUDE.md's note on
+// injected-dependency tests is why.
+func TestSessionRenamedHookIgnoresTheClientlessSession(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// what an untargeted display-message answers in the hook child
+		clientless, clientlessID string
+		// the bystander session's map entry and its tasks' key
+		bystanderID, bystanderKey string
+	}{{
+		name:       "the wrong session is not in the map at all",
+		clientless: "bravo", clientlessID: "$7",
+		bystanderID: "", bystanderKey: "bravo",
+	}, {
+		name:       "the wrong session is in the map under its current name",
+		clientless: "bravo", clientlessID: "$7",
+		bystanderID: "$7", bystanderKey: "bravo",
+	}, {
+		name:       "the wrong session is in the map under an older name",
+		clientless: "bravo", clientlessID: "$7",
+		bystanderID: "$7", bystanderKey: "stale-bravo",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeContext{
+				session:      "alpha2", // the truth: $3 was just renamed to alpha2
+				sessionID:    "$3",
+				dir:          t.TempDir(),
+				clientless:   tc.clientless,
+				clientlessID: tc.clientlessID,
+			}.install(t)
+			path := newDB(t)
+			seedDB(t, path, func(ctx context.Context, db *store.DB) {
+				sessionTask(t, db, ctx, "the renamed session's task", "alpha")
+				sessionTask(t, db, ctx, "the bystander's task", tc.bystanderKey)
+				if err := db.RecordSession(ctx, "$3", "alpha"); err != nil {
+					t.Fatalf("RecordSession: %v", err)
+				}
+				if tc.bystanderID != "" {
+					if err := db.RecordSession(ctx, tc.bystanderID, tc.bystanderKey); err != nil {
+						t.Fatalf("RecordSession: %v", err)
+					}
+				}
+			})
+
+			code, stdout, stderr := run(t, "session-renamed", "--db", path)
+			if code != 0 {
+				t.Fatalf("exit code %d, want 0 (stderr: %s)", code, stderr)
+			}
+			if stdout != "" || stderr != "" {
+				t.Errorf("not silent: stdout %q, stderr %q", stdout, stderr)
+			}
+
+			got := sessionKeys(t, path)
+			if !contains(got, "alpha2") {
+				t.Errorf("session keys = %v: the renamed session's task did not move to"+
+					" alpha2 — the command resolved the session from the client instead"+
+					" of from $TMUX", got)
+			}
+			if contains(got, "alpha") {
+				t.Errorf("session keys = %v: a task is still filed under the old name", got)
+			}
+			// The bystander is untouched. A fix that resolves the wrong session
+			// and *finds* it is worse than the bug it replaces: it rewrites
+			// somebody else's list rather than doing nothing.
+			if !contains(got, tc.bystanderKey) {
+				t.Errorf("session keys = %v: the bystander's task left %q — an unrelated"+
+					" session's tasks were rewritten", got, tc.bystanderKey)
+			}
+			// And its map entry still says what it said.
+			if tc.bystanderID != "" {
+				if name, err := mappedName(t, path, tc.bystanderID); err != nil || name != tc.bystanderKey {
+					t.Errorf("map[%s] = %q (err %v), want %q", tc.bystanderID, name, err, tc.bystanderKey)
+				}
+			}
+		})
+	}
+}
+
+// A $TMUX this code cannot parse must fail, not fall back to asking tmux which
+// session is current — that fallback *is* the bug, and it would be reinstated in
+// the one path where no human is watching the exit code.
+func TestSessionRenamedRejectsAnUnusableTmuxEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, want string
+	}{
+		{"no session field", "/tmp/fake-tmux,1", "no session id in $TMUX"},
+		{"empty session field", "/tmp/fake-tmux,1,", "no session id in $TMUX"},
+		{"session field is not a number", "/tmp/fake-tmux,1,$3", "not a number"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// clientless is set to a session that WOULD be found in the map, so a
+			// fallback to the untargeted query would look like success.
+			fakeContext{
+				session: "alpha2", sessionID: "$3", dir: t.TempDir(),
+				tmuxEnv:    tc.env,
+				clientless: "bravo", clientlessID: "$7",
+			}.install(t)
+			path := newDB(t)
+			seedDB(t, path, func(ctx context.Context, db *store.DB) {
+				sessionTask(t, db, ctx, "somebody's task", "stale-bravo")
+				if err := db.RecordSession(ctx, "$7", "stale-bravo"); err != nil {
+					t.Fatalf("RecordSession: %v", err)
+				}
+			})
+
+			code, _, stderr := run(t, "session-renamed", "--db", path)
+			if code != 1 {
+				t.Errorf("exit code %d, want 1 (stderr: %s)", code, stderr)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want it to name the reason (%q)", stderr, tc.want)
+			}
+			if got := sessionKeys(t, path); len(got) != 1 || got[0] != "stale-bravo" {
+				t.Errorf("session keys = %v: something was rewritten despite the"+
+					" unusable $TMUX", got)
+			}
+		})
+	}
+}
