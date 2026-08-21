@@ -1,7 +1,7 @@
 # Query A Named Scope: `tdo list --session backend`
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-list-named-scope
 
 ## Goal
 `tdo list --session <name>` and `tdo list --dir <path>` list the tasks filed under a *named*
