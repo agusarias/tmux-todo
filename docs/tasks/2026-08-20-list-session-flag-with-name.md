@@ -1,7 +1,7 @@
 # Query A Named Scope: `tdo list --session backend`
 
 **Status:** review
-**Worktree:** ../todo-list-named-scope
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 `tdo list --session <name>` and `tdo list --dir <path>` list the tasks filed under a *named*
@@ -243,8 +243,9 @@ and the same mutation is repeated against the finished code.
 ## Evidence
 
 Verified in `../todo-list-named-scope` on go 1.26 (`/opt/homebrew/bin/go`), darwin/arm64.
-Merged into local `main` as **MERGE_HASH** (`git show MERGE_HASH`); the feature commit is
-**FEATURE_HASH**.
+Merged into local `main` as **bc8cbcc** (`git show bc8cbcc`); the feature commit is
+**0e7f926**. A follow-up merge, **f9556b3**, removes a stray file the first one carried — see
+"One mistake worth recording" at the end of this section.
 
 ### The lead finding, re-measured before any change
 
@@ -433,6 +434,19 @@ $ make test-plugin   -> plugin harness: 140 passed, 0 failed
 **"CI green on the push" is not done and cannot be by the executor** — pushing is the user's
 call via the curator. Everything CI runs (`make lint`, `make test`, `make test-plugin`) is green
 locally; the cross-compile matrix is untouched by this change, which is `internal/cli` only.
+
+### One mistake worth recording
+
+The first merge (bc8cbcc) included **`internal/cli/--json`, a 32KB SQLite database**, not
+source. Cause: the `list --db --json` leg of the dash-guard table uses `--json` as the `--db`
+value when the guard is absent — which is exactly what the mutation proof arranges — so running
+that proof from the package directory created the file, and `git add -A` committed it.
+
+Fixed in f9556b3: the file is deleted, and the test now does `t.Chdir(t.TempDir())` so a future
+mutation run litters nowhere. The leg itself is kept — `--db` is the value-taking flag that
+existed *before* this task, so it is what proves the guard is not special-cased to the two new
+flags. Recorded in CLAUDE.md: a test whose failure mode is creating a file needs somewhere
+disposable to be standing.
 
 ### Definition of done
 
