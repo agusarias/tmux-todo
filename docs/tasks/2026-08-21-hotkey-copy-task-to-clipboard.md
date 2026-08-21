@@ -1,7 +1,7 @@
 # Copy The Selected Task To The Clipboard With `y`
 
-**Status:** in-progress
-**Worktree:** ../todo-copy-to-clipboard
+**Status:** review
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 Pressing `y` in the popup copies the selected task's text to the clipboard, and the popup says
@@ -182,6 +182,10 @@ and is injectable for tests. `cfg.Copy` is set to whichever applies.
 
 
 ## Evidence
+
+**Merged into local `main` as `e4da5b9`** (branch `copy-to-clipboard`, work commit `a791b0f`).
+Not pushed. Read the diff with `git show e4da5b9` or `git log -1 -p a791b0f`; the worktree is
+gone. `go build ./...` and `go test ./...` were re-run on the merge result, green.
 
 ### Sweep (DoD 12)
 
