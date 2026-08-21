@@ -1,7 +1,7 @@
 # Completed Rows Stay Visible For 24h, Grouped At The End Of Their Tier
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-done-24h
 
 ## Goal
 A task completed within the last 24h is visible in the popup whenever you arrive — not only
