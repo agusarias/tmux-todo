@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/agusarias/tmux-todo/internal/scope"
@@ -84,30 +85,90 @@ func openEnv(dbFlag string, out, errOut io.Writer) (*env, func(), error) {
 // database, including keys that are not currently resolvable.
 const scopeAll = "all"
 
-// filter turns the --scope flag into a store.Filter. It exists exactly once
-// because list and count must agree on what --scope means; two copies of this
+// selector is the one question list and count ask about *which* tasks, in the
+// three spellings a user can ask it. At most one field may be present; all absent
+// means "the active merged set".
+//
+// It is a struct rather than three arguments so the mutual exclusion and the
+// defaulting rule live in filter() alone. list and count each parse their own
+// FlagSet and hand the result here; giving one command a selector the other
+// lacked is exactly what the shared helper exists to prevent.
+//
+// The fields are POINTERS because "absent" and "present but empty" are different
+// questions. `tdo list --session=` is a question about a session with no name —
+// which no task can have — and treating it as absence would silently list the
+// active set instead, the same shape of wrong answer as the swallowed-flag bug
+// the dash guard exists for.
+type selector struct {
+	scope   *string // --scope: session|dir|global|all — a scope *kind*, resolved from context
+	session *string // --session <name>: a session key, verbatim
+	dir     *string // --dir <path>: a path, normalised through scope.DirKey
+}
+
+// newSelector reads the scope flags out of a parsed FlagSet.
+//
+// It uses fs.Visit, which reports only the flags actually given, rather than
+// reading the values fs.String returned — those are indistinguishable from a
+// flag left off entirely. Both commands build their selector here so neither can
+// grow its own idea of what "given" means.
+func newSelector(fs *flag.FlagSet) selector {
+	var sel selector
+	fs.Visit(func(f *flag.Flag) {
+		v := f.Value.String()
+		switch f.Name {
+		case "scope":
+			sel.scope = &v
+		case "session":
+			sel.session = &v
+		case "dir":
+			sel.dir = &v
+		}
+	})
+	return sel
+}
+
+// filter turns a selector into a store.Filter. It exists exactly once because
+// list and count must agree on what these flags mean; two copies of this
 // defaulting rule would be two chances to disagree.
 //
-// The three cases are genuinely different and easy to conflate:
+// The cases are genuinely different and easy to conflate:
 //
-//	no flag     -> the active merged set, populated *explicitly*
-//	--scope=all -> Scopes left nil, which the store reads as every scope
-//	--scope=<k> -> that one scope, or ErrUnavailable
+//	nothing set     -> the active merged set, populated *explicitly*
+//	--scope=all     -> Scopes left nil, which the store reads as every scope
+//	--scope=<kind>  -> that kind resolved from the current context, or ErrUnavailable
+//	--session <n>   -> session:<n>, whatever the current context is
+//	--dir <p>       -> dir:DirKey(p), whatever the current context is
 //
 // An empty Filter.Scopes means "all" to the store, so the flagless case must
 // name its scopes rather than leaving the field zero.
-func (e *env) filter(scopeFlag string, includeDone bool) (store.Filter, error) {
+//
+// The named selectors and --scope differ in a way worth stating: --scope asks
+// about *here* and so can fail (Ruling A — an unavailable scope must not
+// masquerade as an empty list), while --session and --dir ask about stored rows
+// and so never fail and never consult tmux. A session that was killed or renamed
+// is precisely the list worth asking for.
+func (e *env) filter(sel selector, includeDone bool) (store.Filter, error) {
 	f := store.Filter{IncludeDone: includeDone}
+	if err := sel.validate(); err != nil {
+		return store.Filter{}, err
+	}
 	switch {
-	case scopeFlag == "":
+	case sel.session != nil:
+		// Verbatim: a session key *is* the tmux session name, with no
+		// normalisation anywhere in internal/scope. Cleaning it here would look
+		// helpful and would miss the rows.
+		f.Scopes = []task.Scope{{Kind: task.ScopeSession, Key: *sel.session}}
+	case sel.dir != nil:
+		f.Scopes = []task.Scope{{Kind: task.ScopeDir, Key: dirSelectorKey(*sel.dir)}}
+	case sel.scope == nil:
 		f.Scopes = e.scopes.Active()
-	case scopeFlag == scopeAll:
+	case *sel.scope == scopeAll:
 		// Deliberately nil.
 	default:
-		kind := task.ScopeKind(scopeFlag)
+		kind := task.ScopeKind(*sel.scope)
 		if !kind.Valid() {
 			return store.Filter{}, usagef("unknown scope %q (want %s or %s)",
-				scopeFlag, strings.Join(kindNames(), ", "), scopeAll)
+				*sel.scope, strings.Join(kindNames(), ", "), scopeAll)
 		}
 		// A read of an unavailable scope fails like a write does: an empty list
 		// would be indistinguishable from a scope that has no tasks.
@@ -118,6 +179,59 @@ func (e *env) filter(scopeFlag string, includeDone bool) (store.Filter, error) {
 		f.Scopes = []task.Scope{s}
 	}
 	return f, nil
+}
+
+// validate enforces that the three selectors are three spellings of one
+// question, and that whichever spelling was used carries an actual value.
+//
+// An empty value is a usage error rather than a silent fall-through to the active
+// set: "absent beats empty" is the rule scope keys follow everywhere else in this
+// repo, and no task can be filed under an empty session or dir key, so the query
+// can only ever have been a mistake.
+func (sel selector) validate() error {
+	var given []string
+	for _, f := range []struct {
+		name  string
+		value *string
+	}{
+		{"--scope", sel.scope},
+		{"--session", sel.session},
+		{"--dir", sel.dir},
+	} {
+		if f.value == nil {
+			continue
+		}
+		given = append(given, f.name)
+		if *f.value == "" {
+			return usagef("%s needs a value", f.name)
+		}
+	}
+	if len(given) > 1 {
+		return usagef("%s are mutually exclusive: they are three spellings of one question",
+			strings.Join(given, " and "))
+	}
+	return nil
+}
+
+// dirSelectorKey normalises a --dir value the way `add` files one: through
+// scope.DirKey, never a reimplementation. "Absolute, cleaned, symlink-resolved,
+// worktrees folded into the main repo" is a set of rules pinned by tests in
+// internal/scope, and a second copy that agrees today would drift — with the
+// failure showing up as an empty list rather than an error.
+//
+// DirKey lstats the path, so it fails on a directory that no longer exists. That
+// case is the whole point of the flag (a deleted project's stranded list), so it
+// falls back to cleaning and absolutising instead of erroring. The fallback is
+// exact whenever no symlink was involved and wrong when one was — see the usage
+// text; --scope=all is the reliable way to find a stranded dir key.
+func dirSelectorKey(path string) string {
+	if key, err := scope.DirKey(path); err == nil {
+		return key
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
 }
 
 // addScope turns the three mutually exclusive scope flags into the scope a new
@@ -198,7 +312,11 @@ func fail(w io.Writer, err error) int {
 // "--", and the "--" this function inserts keeps the escaped text intact
 // through the reorder.
 func parseArgs(fs *flag.FlagSet, args []string) error {
-	flags, positionals := splitArgs(fs, args)
+	flags, positionals, err := splitArgs(fs, args)
+	if err != nil {
+		fmt.Fprintf(fs.Output(), "tdo: %v\n", err)
+		return err
+	}
 	reordered := make([]string, 0, len(args)+1)
 	reordered = append(reordered, flags...)
 	if len(positionals) > 0 {
@@ -215,13 +333,18 @@ func parseArgs(fs *flag.FlagSet, args []string) error {
 // otherwise `tdo add "text" --db path` reorders into `--db "text" path` and the
 // database flag quietly takes the task text as its value. Whether the next token
 // belongs to the flag is a question only the FlagSet can answer, hence fs.
-func splitArgs(fs *flag.FlagSet, args []string) (flags, positionals []string) {
+//
+// It also refuses a dash-leading token as a separate-token value, which is the
+// guard described below. That check lives here rather than in each command
+// because the hazard is a property of "this flag consumes the next token" — the
+// exact question takesValue already answers — not of any particular flag.
+func splitArgs(fs *flag.FlagSet, args []string) (flags, positionals []string, err error) {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
-			return flags, append(positionals, args[i+1:]...)
+			return flags, append(positionals, args[i+1:]...), nil
 		}
-		if len(arg) < 2 || arg[0] != '-' {
+		if !looksLikeFlag(arg) {
 			positionals = append(positionals, arg)
 			continue
 		}
@@ -231,11 +354,37 @@ func splitArgs(fs *flag.FlagSet, args []string) (flags, positionals []string) {
 			continue // --flag=value carries its own value
 		}
 		if takesValue(fs, name) && i+1 < len(args) {
+			if looksLikeFlag(args[i+1]) {
+				return nil, nil, dashValueError(arg, args[i+1])
+			}
 			i++
 			flags = append(flags, args[i])
 		}
 	}
-	return flags, positionals
+	return flags, positionals, nil
+}
+
+// looksLikeFlag is the one definition of "this token is a flag, not a value",
+// used both to partition and to guard. A bare "-" is not one: it has no name.
+func looksLikeFlag(arg string) bool {
+	return len(arg) >= 2 && arg[0] == '-'
+}
+
+// dashValueError is the guard that keeps a swallowed flag from becoming a silent
+// wrong answer.
+//
+// `tdo list --session --json` would otherwise set the session name to "--json",
+// drop --json, and exit 0 with an empty list — the same silent-wrong-scope class
+// `tdo add` was fixed for, and measurably worse here because a *name* has no
+// vocabulary to reject it. --scope survives the same input only by accident:
+// "--json" happens not to be a valid scope kind. A session or directory name can
+// be any string, so the parser has to be the thing that objects.
+//
+// The escape is the = form, which is unambiguous, and it must keep working: a
+// session genuinely called "-json" is unusual but legal.
+func dashValueError(flagArg, value string) error {
+	return usagef("%s needs a value, but the next argument is another flag (%s)."+
+		" If %q really is the value, write %s=%s", flagArg, value, value, flagArg, value)
 }
 
 // takesValue reports whether the named flag needs the following token as its

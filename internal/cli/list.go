@@ -17,7 +17,13 @@ func runList(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "database path (default: XDG data dir)")
-	scopeFlag := fs.String("scope", "", "session|dir|global|all (default: the active merged set)")
+	// Registered but not read here: newSelector reads them back through fs.Visit,
+	// which is the only way to tell "--session=" from no --session at all. They
+	// still have to be declared so the FlagSet knows they take a value — that is
+	// what makes `--session <name>` parse and `--session --json` a rejection.
+	fs.String("scope", "", "session|dir|global|all (default: the active merged set)")
+	fs.String("session", "", "tasks filed under this session name, running or not")
+	fs.String("dir", "", "tasks filed under this directory's repo root")
 	all := fs.Bool("all", false, "include completed tasks")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	if err := parseArgs(fs, args); err != nil {
@@ -33,7 +39,7 @@ func runList(args []string, stdout, stderr io.Writer) int {
 	}
 	defer closeDB()
 
-	filter, err := e.filter(*scopeFlag, *all)
+	filter, err := e.filter(newSelector(fs), *all)
 	if err != nil {
 		return fail(stderr, err)
 	}

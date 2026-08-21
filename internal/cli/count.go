@@ -14,7 +14,10 @@ func runCount(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("count", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "database path (default: XDG data dir)")
-	scopeFlag := fs.String("scope", "", "session|dir|global|all (default: the active merged set)")
+	// See runList: registered for the FlagSet's benefit, read back by newSelector.
+	fs.String("scope", "", "session|dir|global|all (default: the active merged set)")
+	fs.String("session", "", "tasks filed under this session name, running or not")
+	fs.String("dir", "", "tasks filed under this directory's repo root")
 	pending := fs.Bool("pending", false, "count only pending tasks")
 	if err := parseArgs(fs, args); err != nil {
 		return 2
@@ -33,7 +36,7 @@ func runCount(args []string, stdout, stderr io.Writer) int {
 	// where list defaults to pending and --all widens it. That asymmetry is what
 	// docs/design.md specifies, and it is why both go through the same filter()
 	// rather than each deciding what IncludeDone means.
-	filter, err := e.filter(*scopeFlag, !*pending)
+	filter, err := e.filter(newSelector(fs), !*pending)
 	if err != nil {
 		return fail(stderr, err)
 	}

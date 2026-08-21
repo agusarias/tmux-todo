@@ -25,11 +25,12 @@ usage:
 
 commands:
   add "text" [--session|--dir|--global]   add a task (default: sticky scope)
-  list [--scope=session|dir|global|all] [--all] [--json]
-                                          list tasks (default: the active set)
+  list [--scope=session|dir|global|all | --session <name> | --dir <path>]
+       [--all] [--json]                   list tasks (default: the active set)
   done <id>                               mark a task complete
   rm <id>                                 delete a task
-  count [--pending] [--scope=...]         print a bare count
+  count [--pending] [--scope=... | --session <name> | --dir <path>]
+                                          print a bare count
   tui                                     open the popup TUI
   session-renamed [-- "<name>"]           re-file a renamed session's tasks
                                           under its current name (the tmux
@@ -44,6 +45,22 @@ Scope flags may come before or after the text. Task text that starts with a
 dash needs a "--" separator: tdo add --global -- "-n is not a flag".
 Outside tmux, session scope is unavailable and --session fails rather than
 filing the task somewhere else.
+
+Asking about a named scope, on list and count:
+  --session <name>  tasks filed under that tmux session name, used verbatim.
+  --dir <path>      tasks filed under that directory, normalised to its repo
+                    root the same way "add --dir" files them.
+Unlike --scope, these ask about stored tasks rather than about where you are:
+they never consult tmux, work outside it, and a session that is not running or
+a directory you are not in returns an empty list and exit 0. --scope, --session
+and --dir are mutually exclusive.
+
+A value starting with a dash must use the "=" form, or it is rejected rather
+than swallowed: tdo list --session=-json, not tdo list --session -json.
+
+Limitation: --dir cannot resolve symlinks for a path that no longer exists, so
+a deleted directory whose key was stored through a symlink will not match. Use
+--scope=all to find stranded dir keys.
 `
 
 // Run dispatches args (os.Args[1:]) and returns the process exit code.
