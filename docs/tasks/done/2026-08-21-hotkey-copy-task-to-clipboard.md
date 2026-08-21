@@ -1,6 +1,6 @@
 # Copy The Selected Task To The Clipboard With `y`
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -320,3 +320,39 @@ Decisions log.
   OSC 52, recorded in `internal/cli/copy.go` and the brief's Constraints, not a test gap.
 - The runner's tmux here is 3.7b, so the `-w` fallback path is exercised only by its unit
   test, not end to end.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All twelve DoD items check out, re-verified on `main`
+rather than from the Evidence section alone: `make lint` clean, `go test ./...` green,
+`make test-plugin` **196 passed, 0 failed**, and `internal/cli/testdata/` untouched.
+
+**Three executor decisions accepted.**
+
+1. **The `-w` fallback reports success and says nothing about having dropped `-w`.** The plan
+   asked for a message; the seam cannot carry one. `Copy func(string) error` has a single
+   channel, using the error for a warning would make DoD 6's "a failing copy says so" mean two
+   different things, and a second channel would break DoD 9's "exactly one field". The tmux
+   paste buffer did fill, so from the popup's side the copy happened. Documented in
+   `internal/cli/copy.go` and CLAUDE.md instead. `set-clipboard off` gets the same treatment.
+2. **`y` shares the `?` overlay's existing action line.** A sixth line would push the version
+   stamp off the bottom at the design's own 60x15 popup — the same width/height economy that
+   kept the version out of the footer.
+3. **"Verbatim" is measured against the stored text, not the typed one**, because `store.Add`
+   trims. Asserting the typed string would have asserted that the store does not trim, which is
+   a different and false claim. The right instinct.
+
+**The mutation worth remembering** is the whitespace collapse. It began at the setter, where
+every test passed; `TestFrameNeverExceedsThePane`'s new `copied hostile` mode — which sets
+`m.notice` directly instead of pressing `y` — is what failed, and moving `oneLine` into
+`titleLine` is what fixed it. The invariant `chromeHeight` rests on is a property of the line
+that gets *rendered*, so it has to be enforced where the line is built. Dropping it again fails
+432 assertions with the height backstop firing. That is the fourth frame bug this class has
+caught and the first one caught *before* shipping.
+
+**Known limits, accepted as stated:** `-w` reaching the system clipboard is asserted nowhere (it
+depends on the terminal honouring tmux's OSC 52 forwarding and on `set-clipboard`); a terminal
+that silently ignores OSC 52 is indistinguishable from one that honoured it, which is a property
+of the escape and not a test gap; and the `-w` fallback is unit-tested only, since the local tmux
+is 3.7b.
+
