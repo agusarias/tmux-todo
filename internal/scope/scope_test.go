@@ -692,3 +692,134 @@ func TestLiveSessionsAgainstARealServer(t *testing.T) {
 		}
 	}
 }
+
+// EnvSession's whole point is the argv: the id comes out of $TMUX's third field
+// and goes into a -t target, so tmux answers for the session the hook fired for
+// rather than for whatever session it would pick with no client.
+func TestEnvSessionTargetsTheIDFromTmuxEnv(t *testing.T) {
+	var argv [][]string
+	r := Resolver{
+		TmuxEnv: "/private/tmp/tmux-501/default,52789,7",
+		Run: func(name string, args ...string) ([]byte, error) {
+			argv = append(argv, append([]string{name}, args...))
+			return []byte("alpha2\n"), nil
+		},
+	}
+
+	name, id, err := r.EnvSession()
+	if err != nil {
+		t.Fatalf("EnvSession: %v", err)
+	}
+	if name != "alpha2" || id != "$7" {
+		t.Errorf("EnvSession = (%q, %q), want (\"alpha2\", \"$7\")", name, id)
+	}
+	if len(argv) != 1 {
+		t.Fatalf("EnvSession ran %d commands, want 1: %v", len(argv), argv)
+	}
+	// No trailing ":" — a "$n" token is unambiguously a session id, unlike the
+	// "=name" form which display-message parses as a pane name without one.
+	want := []string{"tmux", "display-message", "-t", "$7", "-p", "#{session_name}"}
+	if !slicesEqual(argv[0], want) {
+		t.Errorf("call = %v, want %v", argv[0], want)
+	}
+}
+
+// A name tmux cannot be asked to target as a *name* is reachable by id, which is
+// the second reason the hook path goes through here: ":" is the character tmux
+// splits a target on, so "=weird:name:" is unusable while "$2" is not.
+func TestEnvSessionReachesANameWithAColon(t *testing.T) {
+	r := Resolver{
+		TmuxEnv: "/tmp/tmux/default,1,2",
+		Run:     func(string, ...string) ([]byte, error) { return []byte("weird:name\n"), nil },
+	}
+	name, id, err := r.EnvSession()
+	if err != nil {
+		t.Fatalf("EnvSession: %v", err)
+	}
+	if name != "weird:name" || id != "$2" {
+		t.Errorf("EnvSession = (%q, %q), want (\"weird:name\", \"$2\")", name, id)
+	}
+}
+
+// Every unusable environment must fail, and must fail *without* querying tmux.
+// Asking tmux anyway would mean asking it which session is current — the exact
+// client-dependent question that made the hook resolve the wrong session.
+func TestEnvSessionRefusesAnUnusableEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name, env       string
+		wantUnavailable bool
+	}{
+		{name: "outside tmux", env: "", wantUnavailable: true},
+		{name: "no session field", env: "/tmp/tmux/default,1"},
+		{name: "empty session field", env: "/tmp/tmux/default,1,"},
+		{name: "socket path only", env: "/tmp/tmux/default"},
+		{name: "session field carries the $ sigil", env: "/tmp/tmux/default,1,$3"},
+		{name: "session field is a name", env: "/tmp/tmux/default,1,alpha"},
+		{name: "session field has trailing junk", env: "/tmp/tmux/default,1,3x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Resolver{
+				TmuxEnv: tc.env,
+				Run: func(string, ...string) ([]byte, error) {
+					t.Error("tmux was queried despite an unusable $TMUX — a fallback here" +
+						" restores the client-dependent resolution this method replaces")
+					return []byte("bravo\n"), nil
+				},
+			}
+			name, id, err := r.EnvSession()
+			if err == nil {
+				t.Fatalf("EnvSession accepted %q, returning (%q, %q)", tc.env, name, id)
+			}
+			if tc.wantUnavailable && !errors.Is(err, ErrUnavailable) {
+				t.Errorf("EnvSession outside tmux = %v, want ErrUnavailable", err)
+			}
+		})
+	}
+}
+
+// tmux reports an unknown target by printing nothing and exiting 0 — the same
+// trap SessionID documents — so an empty answer has to be caught here or the
+// caller gets an empty session key.
+func TestEnvSessionErrors(t *testing.T) {
+	base := Resolver{TmuxEnv: "/tmp/tmux/default,1,3"}
+
+	failing := base
+	failing.Run = func(string, ...string) ([]byte, error) { return nil, errors.New("can't find session") }
+	if _, _, err := failing.EnvSession(); err == nil {
+		t.Error("EnvSession swallowed a tmux failure")
+	}
+
+	silent := base
+	silent.Run = func(string, ...string) ([]byte, error) { return []byte("  \n"), nil }
+	if _, _, err := silent.EnvSession(); err == nil {
+		t.Error("EnvSession accepted an empty name as success")
+	}
+}
+
+// The live leg: inside a real tmux, EnvSession must agree with what tmux itself
+// says about the session $TMUX names. Skipped where there is no server, which is
+// why the fake-argv tests above carry the load on CI.
+func TestEnvSessionAgainstRealTmux(t *testing.T) {
+	if !tmuxAlive() {
+		t.Skip("no reachable tmux server")
+	}
+	env := os.Getenv("TMUX")
+	if env == "" {
+		t.Skip("not inside tmux")
+	}
+	r := Resolver{TmuxEnv: env}
+	name, id, err := r.EnvSession()
+	if err != nil {
+		t.Fatalf("EnvSession: %v", err)
+	}
+	out, err := exec.Command("tmux", "display-message", "-t", id, "-p", "#{session_name}").Output()
+	if err != nil {
+		t.Fatalf("tmux display-message -t %s: %v", id, err)
+	}
+	if want := strings.TrimSpace(string(out)); name != want {
+		t.Errorf("EnvSession name = %q, tmux says %q for %s", name, want, id)
+	}
+	if want := "$" + strings.Split(env, ",")[2]; id != want {
+		t.Errorf("EnvSession id = %q, want %q from $TMUX", id, want)
+	}
+}

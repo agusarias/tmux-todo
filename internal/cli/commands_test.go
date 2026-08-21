@@ -31,6 +31,26 @@ type fakeContext struct {
 	// fake resolver inside tmux on its own, since that path needs no current
 	// session of its own.
 	namedSessions map[string]string
+	// clientless is the session an UNTARGETED display-message resolves to — the
+	// one tmux picks when there is no client to ask, which is the situation every
+	// run-shell hook child is in. Empty means "the same session as targeted",
+	// i.e. a pane with a client.
+	//
+	// This field is the whole reason the hook bug is reachable without a tmux
+	// server: set it to something other than session, and any code that asks
+	// "which session am I in" without a target gets the wrong answer, exactly as
+	// it does in a real hook. A fake that answered both queries with one string
+	// could not tell the two questions apart, and that is how the bug shipped.
+	clientless string
+	// clientlessID is the id that comes back with it. tmux answers the whole
+	// untargeted query from the same wrong session, so name and id must move
+	// together here or the fake would present a pair no real tmux produces —
+	// and the "already matches" and "unknown id" halves of the real failure
+	// would both be unreachable.
+	clientlessID string
+	// tmuxEnv overrides the $TMUX value install derives from sessionID, so a test
+	// can present an environment the hook path cannot parse.
+	tmuxEnv string
 	// tmuxCalls counts subprocesses, for the one-call assertions.
 	tmuxCalls *int
 }
@@ -45,8 +65,8 @@ func (f fakeContext) install(t *testing.T) {
 	}
 	newResolver = func() scope.Resolver {
 		r := scope.Resolver{StateDir: stateDir}
-		if f.session != "" || f.namedSessions != nil {
-			r.TmuxEnv = "/tmp/fake-tmux,1,0"
+		if f.session != "" || f.namedSessions != nil || f.tmuxEnv != "" {
+			r.TmuxEnv = f.env()
 			r.Run = f.run
 		}
 		r.Getwd = func() (string, error) {
@@ -59,31 +79,60 @@ func (f fakeContext) install(t *testing.T) {
 	}
 }
 
-// run answers the two display-message shapes tdo issues: the untargeted
-// three-field query Resolve makes, and the targeted single-field one the rename
-// path makes. Dispatching on the arguments is what makes the difference visible
-// to a test — a fake that answered both with the same string would hide a
-// command asking the wrong question.
+// env is the $TMUX the fake resolver presents. Its third field is the session,
+// and it is derived from sessionID rather than hardcoded because the hook path
+// reads the session out of exactly that field — a fixed "…,1,0" would have every
+// test agree with itself while disagreeing with the sessionID the same fake
+// reports through tmux.
+func (f fakeContext) env() string {
+	if f.tmuxEnv != "" {
+		return f.tmuxEnv
+	}
+	return "/tmp/fake-tmux,1," + strings.TrimPrefix(f.sessionID, "$")
+}
+
+// run answers the three display-message shapes tdo issues: the untargeted
+// three-field query Resolve makes, the "=name:"-targeted one the named rename
+// form makes, and the "$id"-targeted one the hook path makes. Dispatching on the
+// arguments is what makes the difference visible to a test — a fake that answered
+// them all with the same string would hide a command asking the wrong question,
+// which is the bug this dispatch exists to expose.
 func (f fakeContext) run(_ string, args ...string) ([]byte, error) {
 	if f.tmuxCalls != nil {
 		*f.tmuxCalls++
 	}
 	if target, ok := targetArg(args); ok {
-		id, known := f.namedSessions[target]
+		if strings.HasPrefix(target, "$") {
+			// scope.EnvSession: which session is "$n"?
+			if target != f.sessionID {
+				return nil, fmt.Errorf("can't find session: %s", target)
+			}
+			return []byte(f.session + "\n"), nil
+		}
+		// scope.SessionID: what id does this name have?
+		name := strings.TrimSuffix(strings.TrimPrefix(target, "="), ":")
+		id, known := f.namedSessions[name]
 		if !known {
-			return nil, fmt.Errorf("can't find session: %s", target)
+			return nil, fmt.Errorf("can't find session: %s", name)
 		}
 		return []byte(id + "\n"), nil
 	}
-	return []byte(f.session + "\n" + f.dir + "\n" + f.sessionID + "\n"), nil
+	// Untargeted: tmux answers from the client, so a hook child gets whatever
+	// clientless names rather than the session it was fired for.
+	session, id := f.session, f.sessionID
+	if f.clientless != "" {
+		session, id = f.clientless, f.clientlessID
+	}
+	return []byte(session + "\n" + f.dir + "\n" + id + "\n"), nil
 }
 
-// targetArg extracts the session name from a "-t =name:" pair, stripping the
-// exact-match syntax scope.SessionID wraps it in.
+// targetArg returns the raw argument of a "-t" pair. It is raw rather than
+// unwrapped because the two targeted queries wrap differently ("=name:" versus
+// "$id") and telling them apart is the point.
 func targetArg(args []string) (string, bool) {
 	for i, a := range args {
 		if a == "-t" && i+1 < len(args) {
-			return strings.TrimSuffix(strings.TrimPrefix(args[i+1], "="), ":"), true
+			return args[i+1], true
 		}
 	}
 	return "", false

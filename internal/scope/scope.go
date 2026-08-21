@@ -259,3 +259,64 @@ func (r Resolver) LiveSessions() map[string]bool {
 	}
 	return live
 }
+
+// EnvSession reports the session this process belongs to, read out of $TMUX and
+// then asked of tmux by id. It is the rename hook's other half, and the reason it
+// exists rather than reusing Resolve is a bug that shipped.
+//
+// Resolve asks tmux for "the current session" with an untargeted
+// display-message. tmux answers that from the *client*, and a run-shell child —
+// which is what a tmux hook is — has none, so tmux falls back to some other
+// session entirely: measured on 3.7b, a hook child fired for session $0 was told
+// it was in $1. The rename then looked the wrong id up in the map, missed, and
+// exited 0 having stranded the tasks. See
+// docs/tasks/2026-08-20-session-renamed-hook-targets-wrong-session.md.
+//
+// $TMUX is "<socket>,<server-pid>,<session>", and its third field is the session
+// the child was started for, so it is the one source here that does not depend on
+// a client. Interpolating it into a target is safe where interpolating a session
+// *name* would not be: the field is a decimal number, which is checked below, so
+// no user data reaches the command line. That check is also what keeps the
+// failure loud — a $TMUX this code cannot parse must not fall back to asking tmux
+// for the current session, because that is precisely the bug.
+//
+// Targeting by id also reaches sessions the named form cannot: a name containing
+// ":" is unusable as a tmux target (":" is the character tmux splits on), while
+// "$2" targets it fine.
+func (r Resolver) EnvSession() (name, id string, err error) {
+	id, err = r.envSessionID()
+	if err != nil {
+		return "", "", err
+	}
+	// No trailing ":" here, unlike SessionID's "=<name>:": a "$<n>" token is
+	// unambiguously a session id, so display-message resolves it to that
+	// session's active pane without help. Verified on tmux 3.7b.
+	out, err := r.run("tmux", "display-message", "-t", id, "-p", "#{session_name}")
+	if err != nil {
+		return "", "", fmt.Errorf("session name for %s: %w", id, err)
+	}
+	name = strings.TrimSpace(string(out))
+	if name == "" {
+		// tmux reports an unknown target by printing nothing and exiting 0, so
+		// this is the only place the failure shows up.
+		return "", "", fmt.Errorf("session name for %s: tmux reported no name (no such session)", id)
+	}
+	return name, id, nil
+}
+
+// envSessionID builds the "$<n>" target from $TMUX's third field.
+func (r Resolver) envSessionID() (string, error) {
+	if r.TmuxEnv == "" {
+		return "", fmt.Errorf("session from environment: %w (not inside tmux)", ErrUnavailable)
+	}
+	fields := strings.Split(r.TmuxEnv, ",")
+	if len(fields) < 3 || fields[2] == "" {
+		return "", fmt.Errorf("session from environment: no session id in $TMUX (%q)", r.TmuxEnv)
+	}
+	for _, c := range fields[2] {
+		if c < '0' || c > '9' {
+			return "", fmt.Errorf("session from environment: $TMUX session field is not a number (%q)", r.TmuxEnv)
+		}
+	}
+	return "$" + fields[2], nil
+}

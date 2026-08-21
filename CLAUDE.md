@@ -28,7 +28,10 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   takes `task.Scope` values and never asks tmux or the filesystem anything.
 - `internal/scope` — pane → scope resolution (`Resolver`/`Resolved`), the pure-Go
   git root walker, and the sticky default kind. Injectable: tests need neither a
-  tmux server nor a git checkout.
+  tmux server nor a git checkout. Three ways to ask tmux about a session, and the
+  differences are load-bearing: `Resolve` (untargeted — needs a client, so never
+  from a hook), `SessionID(name)` (targeted by `=name:`) and `EnvSession`
+  (targeted by the id in `$TMUX`, the only one a client-less hook child can trust).
 - `internal/tui` — Bubble Tea popup: the merged task list. Environment-blind by
   design — it takes a `Config` (store, resolved scopes, home dir, version) from
   `internal/cli` and never resolves a scope or reads the clock itself, so
@@ -226,22 +229,37 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   inherits `$TMUX`, whose third field is the session the hook fired for, so `tdo` asks tmux
   itself and nothing is interpolated. That also fixes what the argument form could not — a
   name containing `:` cannot be used as a tmux target at all.
-  **The inheritance is real; "so tmux will answer for that session" was wrong, and it breaks the
-  hook.** tmux resolves "current session" from the *client*, and a `run-shell` child has none,
-  so it falls back to another session entirely — measured on 3.7b, a hook child whose `$TMUX`
-  ended in `,100` got `session_name=todo` / `session_id=$24` from an untargeted
-  `display-message -p`: an unrelated session. The same call **targeted** answers correctly
-  (`display-message -t "$100" -p '#{session_name}'`, the id built from `$TMUX`'s third field),
-  and interpolating *that* is safe where a name is not — `$TMUX` yields `$<number>`, never user
-  data. The failure is silent and exit 0: `session-renamed` compares the wrong session's name
-  against the map, sees no rename, does nothing. And it works when run by hand in a pane,
-  because a pane *has* a client — so a manual test of this command proves nothing about the
-  hook. Tracked in `docs/tasks/2026-08-20-session-renamed-hook-targets-wrong-session.md`.
+  **But the inheritance only gets you the id — "so tmux will answer for that session" was
+  wrong, and it shipped a bug.** tmux resolves "current session" from the *client*, and a
+  `run-shell` child has none, so an untargeted `display-message` falls back to another session
+  entirely: measured on 3.7b, a hook child whose `$TMUX` ended in `,100` was told
+  `session_name=todo` / `session_id=$24`. `session-renamed` then compared the wrong session's
+  name against the map, saw no rename, and exited 0 with the tasks stranded under the old name —
+  silent, and inert only because the wrong id usually *misses* the map; when it hits, an
+  unrelated session's list gets rewritten. Fixed by `scope.EnvSession`, which builds the target
+  from `$TMUX`'s third field and asks **targeted** (`display-message -t "$100" -p
+  '#{session_name}'`). Interpolating *that* is safe where a name is not — the field is a decimal
+  number, checked before use, so no user data reaches the command line — and it reaches names the
+  `=name:` form cannot, since `:` is the character tmux splits a target on. A `$TMUX` it cannot
+  parse is an **error, never a fallback to the untargeted query**: that fallback is the bug.
+  **The reason it survived Checkpoint 2: the original evidence ran the command by hand in a
+  pane, and a pane HAS a client.** A manual test of this command proves nothing about the hook,
+  and neither does a Go test that calls `runSessionRenamed` directly. The guards are
+  `TestSessionRenamedHookIgnoresTheClientlessSession` (a fake whose *untargeted* answer differs
+  from its targeted one — that asymmetry is the whole point, and a fake without it hides the
+  bug) and the `rename-*` cases in `test/plugin_install_test.sh`, which fire a real hook on a
+  real server. Both are needed; neither is sufficient.
+  **And the client-less fallback sometimes lands on the RIGHT session**, which is how a real
+  end-to-end rename test can pass with the bug fully present — it did, on a two-session server.
+  So every rename case first asserts what a client-less child resolves to and that it is *not*
+  the session under test (`assert_fallback_is_not`). tmux appears to pick the most recently
+  active session, so the decoy is seeded *last*.
   **Corollary for probing this at all: tmux DOES expand `#{...}` in a `run-shell` argument
   before `sh` sees it.** A canary running `display-message -p "…#{session_id}"` printed `00` —
   the server expanded the format to `$100` inside the string and `sh` read that as `${1}00`. So
-  a canary meant to observe the *child's* view must contain no formats, or it silently reports
-  the server's view instead and reads as though the child agreed.
+  a canary meant to observe the *child's* view must contain no formats: put it in a script file
+  and pass only plain arguments, or it silently reports the server's view and reads as though
+  the child agreed.
 - **`set-hook -g` replaces; `set-hook -ga` appends.** A plugin must append or it silently
   eats the user's own `session-renamed` hook. The cost is that re-running the install
   stacks duplicate copies (`show-hooks -g` shows `session-renamed[0]`, `[1]`, …); the hook
@@ -295,6 +313,20 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   sandbox PATH and sandbox only the binaries under test — then assert the sandbox really
   lacks them, so the suite fails loudly instead of degrading if `tdo` or `go` shows up in
   `/usr/bin` later.
+- **A tmux hook child inherits the SERVER's environment — not a pane's, and not the
+  harness's.** So `XDG_DATA_HOME` exported in a pane, or in the shell that sends keys, does not
+  reach it: `tdo session-renamed` opens `store.DefaultPath()`, i.e. **the developer's real
+  database**. Three reproduction attempts died this way, and they reached the real database
+  (harmlessly, by luck: the private server's low session ids were absent from the real map).
+  Set it when the server *starts* — `case_start` takes `VAR=VALUE` arguments for exactly this —
+  and assert `show-environment -g XDG_DATA_HOME` afterwards. Safety requirement, not tidiness.
+- **`tmux` sets `$TMUX_PANE` for a pane's interactive shell but NOT for a pane's initial
+  command.** So `new-session -d -s alpha "tdo add --session x"` is in the same client-less
+  position as a hook and files the task under the *wrong* session, while `send-keys` into the
+  shell resolves correctly. Seeding a session-scoped task in the harness therefore goes through
+  `send-keys` — and needs a readiness handshake first: keystrokes sent before the shell starts
+  reading are buffered, so a poll-and-resend loop made a slow shell rc run all four queued
+  commands and seeded four copies of the same task.
 - **`python3 -m http.server` needs `-u` when its output is redirected.** The
   "Serving HTTP on 127.0.0.1 port NNNNN" line is buffered otherwise, so a harness that
   reads the port out of the log never finds one. That does not fail: `serve_fixture` fell

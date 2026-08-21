@@ -1,6 +1,6 @@
 # The session-renamed Hook Resolves The Wrong Session
 
-**Status:** in-progress
+**Status:** review
 **Worktree:** ../todo-session-renamed-hook
 
 ## Goal
@@ -176,5 +176,258 @@ resolution fix. Then the negative test and the no-op paths.
   with several sessions where the renamed one is *not* whatever the fallback would pick, or it
   proves nothing.
 
+## Decisions (executor, 2026-08-21)
+
+**The fix is a new seam, `scope.EnvSession`, not a patch inside `renamedSession`.** The plan
+suggested checking whether it belongs beside `SessionID` or `jump.go`'s target builder; it
+belongs beside `SessionID`, in `internal/scope`, because it answers the same *kind* of question
+(ask tmux about one specific session) and shares the trap `SessionID` documents — tmux reports
+an unknown target by printing nothing and exiting 0. `internal/cli` keeps no tmux knowledge it
+did not already have.
+
+**A malformed `$TMUX` is an error, not a silent no-op.** The plan said "that must be the
+existing silent no-op path, not a crash and not a fallback to asking tmux". The existing
+behaviour outside tmux is *not* silent — it exits 1 naming the reason, pinned by
+`TestSessionRenamedWithNoNameOutsideTmuxFails` — so "existing" and "silent" pointed in opposite
+directions. Kept it loud and consistent with the code already there: exit 1, no rewrite, and
+never a fallback to the untargeted query. The three DoD 4 no-op paths (unknown id, name already
+current, cold map) are about a *working* tmux and are unchanged. `TestSessionRenamedRejectsAnUnusableTmuxEnv`
+sets `clientless` to a session that *would* be found, so a fallback would look like success.
+
+**The Go-level guard needed a dishonest fake made honest.** `fakeContext` answered the
+untargeted and targeted queries with the same string, so no Go test could tell which question
+the command asked — that is a large part of *why* this shipped. It now dispatches on the target
+and grows `clientless`/`clientlessID`: the session an untargeted `display-message` resolves to
+when there is no client. With that asymmetry the bug is reproducible with no tmux server at all,
+which is what puts the regression guard on the tmux-less CI runner rather than only in
+`make test-plugin`.
+
+**DoD 4's "name already matches" leg cannot be reached by a real rename.** Measured on 3.7b:
+`rename-session -t alpha alpha` does not fire the `session-renamed` hook at all. The path is
+reachable only by a second firing, and a second *concurrent* firing is a race, not an assertion.
+`rename-4` therefore installs a hook whose body runs the command twice in one child — strictly
+ordered, so the second call provably sees the map already current. The Go table test keeps
+covering the path in isolation.
+
+**`assert_fallback_is_not` was added after the mutation proof caught a vacuous case.**
+`rename-4` passed against the pre-fix binary: with only `harness` and `delta` on the server, the
+client-less fallback happened to resolve `delta` — the "lucky fallback" this brief warns about,
+reproduced. Every rename case now asserts, before the rename, what a client-less child resolves
+to and that it is *not* the session under test. That precondition is what makes these cases
+known-able-to-fail rather than assumed to be.
+
 ## Evidence
-(Added by the executor.)
+
+Verified in `../todo-session-renamed-hook` on tmux 3.7b, go 1.26 (`/opt/homebrew/bin/go`),
+darwin/arm64. Merge commit recorded at the end of this section.
+
+### DoD 1 + 3 — a test that fires the real hook, with a bystander
+
+`test/plugin_install_test.sh`, new `rename-*` section. It installs the hook by running the real
+`tmux-todo.tmux` with the real binary on PATH, seeds a session task in `alpha` and in `bravo`
+from inside each session's own interactive shell, then performs a real `rename-session`:
+
+```
+== rename-1-hook-moves-tasks
+    ok   the plugin installed its hook
+    ok   the SERVER's environment carries the sandbox XDG_DATA_HOME
+    ok   seeded a session task in alpha and in bravo
+    -- before: alpha task session|alpha | bravo task session|bravo
+    ok   alpha's task is filed under alpha
+    ok   bravo's task is filed under bravo
+    -- a client-less child resolves the current session as: bravo
+    ok   a client-less child would resolve some OTHER session, so this case can fail
+    -- after : alpha task session|alpha2 | bravo task session|bravo
+    ok   the hook moved the renamed session's task
+    ok   the bystander session's task was left alone
+    ok   the hook printed nothing
+    -- after second rename: alpha task session|alpha3
+    ok   a second rename moves it again (the map was refreshed)
+    ok   the bystander is still untouched
+```
+
+The bystander assertions are DoD 3. The second rename is how the map refresh is proven through
+the hook: it can only find the old name if the first firing wrote it back.
+
+### DoD 2 — resolution from `$TMUX`'s third field, targeted
+
+`scope.EnvSession` splits `$TMUX` on `,`, takes field 3, requires it to be decimal, and asks
+`display-message -t "$<n>" -p '#{session_name}'`. The argv is pinned by
+`TestEnvSessionTargetsTheIDFromTmuxEnv`; `TestEnvSessionAgainstRealTmux` checks it agrees with
+what tmux itself says, and skips where there is no server.
+
+```
+=== RUN   TestEnvSessionTargetsTheIDFromTmuxEnv
+--- PASS: TestEnvSessionTargetsTheIDFromTmuxEnv (0.00s)
+=== RUN   TestEnvSessionReachesANameWithAColon
+--- PASS: TestEnvSessionReachesANameWithAColon (0.00s)
+=== RUN   TestEnvSessionRefusesAnUnusableEnvironment
+    --- PASS: .../outside_tmux            .../no_session_field       .../empty_session_field
+    --- PASS: .../socket_path_only         .../session_field_carries_the_$_sigil
+    --- PASS: .../session_field_is_a_name  .../session_field_has_trailing_junk
+=== RUN   TestEnvSessionErrors
+--- PASS: TestEnvSessionErrors (0.00s)
+=== RUN   TestEnvSessionAgainstRealTmux
+--- PASS: TestEnvSessionAgainstRealTmux (0.02s)
+```
+
+Targeting by id also reaches a name the `=name:` form cannot — measured directly:
+
+```
+$0 -> [harness]     rc=0
+$1 -> [alpha]       rc=0
+$2 -> [weird:name]  rc=0      <- ":" is unusable in a =name: target
+$9 -> []            rc=0      <- unknown target: empty, exit 0. Hence the empty check.
+```
+
+### DoD 4 — the no-op paths are still silent successes
+
+A hook child that writes anything makes tmux open a `[tmux]` window; `assert_no_hook_output`
+counts them, so "silent" is asserted rather than assumed.
+
+```
+== rename-2-unknown-session-is-a-silent-no-op
+    ok   an unknown session renames silently
+    ok   the hook opened a database (it opens the store before resolving)
+    ok   and filed nothing in it
+
+== rename-3-cold-map-is-a-silent-no-op
+    ok   a cold map renames silently
+    ok   the global task is still global, not re-filed
+    ok   and the database still holds exactly its one task
+
+== rename-4-second-firing-is-a-silent-no-op
+    ok   seeded a session task in delta and in the decoy
+    -- a client-less child resolves the current session as: decoy
+    ok   a client-less child would resolve the decoy, so this case can fail
+    -- after : delta task session|delta2
+    ok   the first call in the hook moved the task
+    ok   the decoy's task was left alone
+    ok   the second call found the map already current and said nothing
+```
+
+`rename-2` records a behaviour worth knowing rather than changing: `session-renamed` opens the
+store *before* it works out which session it is, so a hook firing on a machine that has never
+run `tdo` creates an empty database. Left as-is — the brief puts store changes out of scope.
+
+### DoD 5 — mutation proof
+
+`renamedSession`'s no-argument branch reverted to `r.Resolve()` (i.e. exactly the shipped bug),
+rebuilt, both suites re-run.
+
+```
+########## MUTANT: renamedSession resolves via Resolve() again ##########
+== rename-1-hook-moves-tasks
+    -- a client-less child resolves the current session as: bravo
+    ok   a client-less child would resolve some OTHER session, so this case can fail
+    -- after : alpha task session|alpha | bravo task session|bravo
+    FAIL the hook moved the renamed session's task (want 'session|alpha2', got 'session|alpha')
+    FAIL a second rename moves it again (the map was refreshed) (want 'session|alpha3', got 'session|alpha')
+
+== rename-4-second-firing-is-a-silent-no-op
+    -- a client-less child resolves the current session as: decoy
+    FAIL the first call in the hook moved the task (want 'session|delta2', got 'session|delta')
+```
+
+And in Go, where the third leg shows the *destructive* direction the Critical surface section
+warned about — the mutant rewrote a bystander's tasks and its map row:
+
+```
+--- FAIL: TestSessionRenamedHookIgnoresTheClientlessSession/the_wrong_session_is_not_in_the_map_at_all
+    session keys = [bravo alpha]: the renamed session's task did not move to alpha2 — the
+        command resolved the session from the client instead of from $TMUX
+--- FAIL: .../the_wrong_session_is_in_the_map_under_its_current_name
+    session keys = [bravo alpha]: ... a task is still filed under the old name
+--- FAIL: .../the_wrong_session_is_in_the_map_under_an_older_name
+    session keys = [bravo alpha]: the bystander's task left "stale-bravo" — an unrelated
+        session's tasks were rewritten
+    map[$7] = "bravo" (err <nil>), want "stale-bravo"
+--- FAIL: TestSessionRenamedRejectsAnUnusableTmuxEnv/{no_session_field,empty_session_field,session_field_is_not_a_number}
+    exit code 0, want 1 ... session keys = [bravo]: something was rewritten despite the
+        unusable $TMUX
+```
+
+An earlier round of this proof is why `assert_fallback_is_not` exists: `rename-4` passed against
+the mutant before it grew a decoy session (see Decisions).
+
+### DoD 6 — suites, formatting, static build
+
+```
+$ make lint
+go vet ./...
+
+$ make test
+?   github.com/agusarias/tmux-todo/cmd/tdo   [no test files]
+ok  github.com/agusarias/tmux-todo/internal/cli     0.798s
+ok  github.com/agusarias/tmux-todo/internal/scope   1.250s
+ok  github.com/agusarias/tmux-todo/internal/store   0.421s
+ok  github.com/agusarias/tmux-todo/internal/task    0.366s
+ok  github.com/agusarias/tmux-todo/internal/tui     5.902s
+
+$ gofmt -l .
+(no output)
+
+$ make test-plugin
+plugin harness: 140 passed, 0 failed          (was 125 before this task)
+
+$ otool -L bin/tdo
+bin/tdo:
+    /usr/lib/libSystem.B.dylib
+    /usr/lib/libresolv.9.dylib                <- no libsqlite3
+```
+
+### Verification — the end-to-end transcript
+
+A private socket, the real `tmux-todo.tmux` doing the install, `XDG_DATA_HOME` in the server's
+environment, two sessions each with their own task, one real rename.
+
+```
+server XDG_DATA_HOME : XDG_DATA_HOME=/private/var/.../e2e.csHGCG/xdg
+installed hook       : session-renamed[0] run-shell -b ".../bin/tdo session-renamed"
+sessions             : $0|harness $1|alpha $2|bravo
+
+BEFORE  tdo list --json:
+{"tasks":[{"id":2,"text":"bravo task",...,"scope":{"kind":"session","key":"bravo"},...},
+          {"id":1,"text":"alpha task",...,"scope":{"kind":"session","key":"alpha"},...}]}
+
+== tmux rename-session -t alpha alpha2   (the hook fires; nothing interpolated) ==
+
+AFTER   tdo list --json:
+{"tasks":[{"id":2,"text":"bravo task",...,"scope":{"kind":"session","key":"bravo"},...},
+          {"id":1,"text":"alpha task",...,"scope":{"kind":"session","key":"alpha2"},...}]}
+
+sessions             : $0|harness $1|alpha2 $2|bravo
+output windows       : 0 [tmux] window(s)
+```
+
+Task id 1 moved `alpha` -> `alpha2` keeping its id and timestamp; task id 2 under `bravo` is
+byte-identical before and after; nothing was printed.
+
+The first attempt at this transcript failed with `tmux: command not found` — `env -i` left no
+tmux on PATH and the plugin needs a socket-pinning shim, or the install lands on the *default*
+socket. Recorded because it is the same family as every other vacuous-setup trap here: it looked
+like a product failure and was a harness failure, and it announced itself only because the
+script echoed the installed hook.
+
+### Definition of done
+
+1. **A test that fires the real hook** — done. `rename-1` through `rename-4` in
+   `test/plugin_install_test.sh`, driving `rename-session` on a private server through the hook
+   the plugin script installed. Proven able to fail (DoD 5, and `assert_fallback_is_not`).
+2. **Resolution from `$TMUX`'s third field, targeted** — done. `scope.EnvSession`; argv pinned;
+   the decimal check is what makes interpolating it safe.
+3. **The negative test** — done. `bravo` (rename-1) and `decoy` (rename-4) hold their own tasks
+   across the rename and are asserted unchanged; the Go table's third leg shows the mutant
+   failing it, so it is not decorative.
+4. **The no-op paths still no-op silently and exit 0** — done. `rename-2`/`rename-3` through a
+   real hook, `rename-4` for the second firing, and the existing Go table for all three in
+   isolation. Silence is asserted by counting the `[tmux]` output windows tmux opens for a
+   chatty child. Caveat recorded: a same-name rename does not fire the hook at all on 3.7b.
+5. **Mutation proof** — done, above, with real output from both suites.
+6. **`make test`, `make test-plugin`, `make lint` clean; `gofmt -l .` empty; static build** —
+   done, above. Plugin harness 125 -> 140 assertions.
+7. **CLAUDE.md folded into its final form** — done. The "so tmux will answer for that session"
+   correction now reads as a fixed bug with its guards named; two new pitfalls (the hook child
+   inherits the *server's* environment; `$TMUX_PANE` is absent from a pane's initial command,
+   and send-keys needs a readiness handshake); the lucky-fallback vacuity trap; and
+   `internal/scope`'s three ways of asking tmux about a session.
