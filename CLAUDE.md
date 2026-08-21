@@ -37,9 +37,11 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `internal/cli` and never resolves a scope or reads the clock itself, so
   `Update`/`View` are testable without tmux. Row formatting lives in `render.go`
   as pure functions.
-- `internal/tui` also holds the input row (`input.go`, `field.go`) and the deferred
-  delete queue (`delete.go`). Both are pure model state; the only I/O either does is a
-  store command returned from `Update`.
+- `internal/tui` also holds the input row (`input.go`, `field.go`), the deferred
+  delete queue (`delete.go`) and the `y` copy (`copy.go`). All are pure model state; the
+  only I/O any of them does is a store command, or the injected `Config.Copy`, returned
+  from `Update`. `internal/cli/copy.go` is the other half of that seam: `tmux load-buffer`
+  inside tmux, a hand-written OSC 52 escape outside it.
 - `tmux-todo.tmux` — the TPM plugin entry point (bash 3.2; macOS has no newer one).
   Resolves the binary, installs the keybind (with `-e TDO_POPUP_KEY` on root-table installs, so
   the popup can close on the key that opened it) and the rename hook. tmux sources it on
@@ -94,6 +96,17 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - **Version** is stamped via `-ldflags -X .../internal/cli.Version`. It lives in the popup's
   `?` overlay, **not** the footer: the footer has 42 columns in the design's own popup, and a
   `git describe` stamp plus a keymap does not fit — truncation would eat the keys silently.
+- **`y` copies through tmux's buffer, and the text goes on STDIN.** `tmux load-buffer -w -`
+  with `exec.Command`'s `Stdin`, never `set-buffer <text>`: a task's text is user data and
+  there is no tmux format that escapes for a shell, so this is the rename hook's injection
+  bug one argv over. `-w` is what forwards to the system clipboard and needs tmux >= 3.2, so
+  a `-w` failure retries without it and **reports success** — the paste buffer still filled,
+  and overloading the error return with a warning would make "a failing copy says so" mean
+  two things. `set-clipboard off` in a user's config is the same shape and also not a
+  failure. Outside tmux it is a hand-written OSC 52 escape in **one** `io.WriteString`: Bubble
+  Tea renders into the same tty from another goroutine, and a torn escape is garbage on
+  screen rather than a failed copy. A terminal that ignores OSC 52 is indistinguishable from
+  one that honoured it, so a nil error means "tdo wrote the sequence", nothing stronger.
 - **`d` in the popup queues; the DELETE runs at close.** `u` un-hides rather than
   re-inserts, which is the only way the row comes back with its original id, timestamp and
   position (`store.Add` would assign new ones and move it to the top of its tier). The costs
@@ -207,6 +220,23 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   stays green; the same mutation against `frame()` fails 216 assertions. Assert that
   the backstop *did not fire* alongside the dimensions. A safety net that hides the
   bug it catches is worse than no net, and this pattern has now caught itself once.
+- **A one-row invariant belongs to the RENDERER, not to whoever sets the field.** The `y`
+  copy's notice replaces the title line, so it must be exactly one row; the collapse that
+  guarantees it (`oneLine`, whitespace to single spaces) started out in the code that *sets*
+  the notice and moved into `titleLine`. `truncate` clips columns and nothing else clips
+  rows, so a task text holding a newline is a second row that `chromeHeight` never counted —
+  the fourth instance of this repo's one recurring frame bug. Pinned by
+  `TestFrameNeverExceedsThePane`'s `copied hostile` mode, which sets `m.notice` **directly**
+  rather than pressing `y`: that is what makes the assertion about the renderer instead of
+  about one caller, and it is what caught the collapse being in the wrong place. Dropping
+  `oneLine` from `titleLine` fails 432 assertions.
+- **A tmux buffer fills before the popup repaints, and a harness that polls the buffer then
+  captures the screen loses that race.** `copy-1`'s first version asserted the on-screen
+  `copied:` notice from a capture taken the instant `show-buffer` answered — but the buffer
+  is filled by the copy subprocess, which returns before Bubble Tea has handled the
+  resulting message. The buffer assertion passed and the notice assertion failed with the
+  feature entirely correct. Poll for each observable separately; "the side effect landed"
+  is not "the frame has been redrawn".
 - **A row wider than the viewport is silently clipped, not wrapped.** That is how
   tier labels vanished for real dir keys: a dir scope key is an absolute path, and
   a label sized from "whatever width is left" gets no width at all. `columns()`

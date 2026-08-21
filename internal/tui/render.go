@@ -467,7 +467,11 @@ func helpLines(view viewKind, version string) []string {
 	// scope has not already been chosen by one.
 	lines := []string{
 		"j/k move · space done · q quit",
-		"a add · e edit · s re-scope",
+		// `y` rides an existing line rather than taking a new one: helpBody
+		// clips the overlay to listHeight, so a sixth line would push the
+		// version off the bottom at the design's own popup height. 35 columns,
+		// inside the 39 footerText is held to.
+		"a add · e edit · s re-scope · y copy",
 		"d delete · u undo (until close)",
 	}
 	if view == viewAll {

@@ -736,6 +736,19 @@ func TestFrameNeverExceedsThePane(t *testing.T) {
 			}
 			return m
 		}},
+		// The copy notice replaces the title line, so it is the one chrome line
+		// this task changes. Pressed for real, so the whole path — key, command,
+		// message, notice, titleLine — is what gets measured.
+		{"copied", func(t *testing.T, m Model) Model { return pressAndSettle(t, m, "y") }},
+		// ...and the hostile notice, set directly. A task text can hold a
+		// newline, and truncation clips *width* only: one stray row is exactly
+		// the arithmetic that has broken this frame three times, so the frame
+		// has to be measured against a notice no seeded row could produce.
+		{"copied hostile", func(t *testing.T, m Model) Model {
+			m = pressAndSettle(t, m, "y")
+			m.notice = "copied: " + strings.Repeat("wide\nand\ttall ", 30)
+			return m
+		}},
 	}
 
 	// Both views, because the all-tasks view puts *more* lines in the body —
@@ -753,6 +766,9 @@ func TestFrameNeverExceedsThePane(t *testing.T) {
 							m := newLoaded(t, Config{
 								DB: db, Scopes: scopes, Home: "/Users/x", Version: version,
 								LiveSessions: map[string]bool{"pulsar": true},
+								// Without this the "copied" modes press an inert
+								// key and assert nothing — the vacuous-guard trap.
+								Copy: func(string) error { return nil },
 							})
 							sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
 							m = sized.(Model)

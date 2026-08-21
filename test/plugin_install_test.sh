@@ -1232,6 +1232,119 @@ fi
 case_end
 fi
 
+# ================================================================ y copies
+
+# DoD 11 for the clipboard task: the whole chain, nothing stubbed. The real
+# plugin installs the real bind, the real binary runs inside a real popup on a
+# real client, `y` is pressed for real, and `tmux show-buffer` is asked what
+# landed in the buffer.
+#
+# Why this case cannot be replaced by the Go tests: internal/tui is tested
+# against an injected Copy and internal/cli against an injected runner, so
+# between them nothing proves the two halves are connected to each other or that
+# the tmux the popup inherits is the tmux that answers show-buffer. The popup
+# runs in a `display-popup` child of THIS server, so its `tmux load-buffer` lands
+# in this server's buffer stack — which is the fact under test.
+#
+# The text is deliberately awkward: a quote, a double quote and a `$`. It is the
+# payload that would come back mangled — or would have executed — if anything on
+# the path put it through a shell or into an argv. `show-buffer` is compared
+# byte for byte against it.
+if [ -z "$TDO_BIN" ]; then
+    printf '\n== copy-1 SKIPPED: no usable go toolchain to build tdo with.\n'
+    printf '   This is the only case that presses y for real.\n'
+else
+case_start copy-1-y-loads-the-tmux-buffer \
+    XDG_DATA_HOME=$TMPROOT/copy-1-y-loads-the-tmux-buffer/xdg \
+    XDG_STATE_HOME=$TMPROOT/copy-1-y-loads-the-tmux-buffer/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+tm set-option -g @todo-key-table root >/dev/null 2>&1
+tm set-option -g @todo-key C-l >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for C-l root)" "the root C-l binding is installed"
+
+# One task, and its text is both the canary the popup is grepped for and the
+# payload show-buffer is compared against. Seeded outside tmux so the harness's
+# own session never enters the sandbox database.
+COPY_TEXT="ZZCOPYZZ it's a \"\$HOME\" task"
+mkdir -p "$(dirname "$DB")"
+env -u TMUX "$TDO_BIN" add --db "$DB" --global "$COPY_TEXT" >/dev/null 2>&1
+assert_eq "1" "$(env -u TMUX "$TDO_BIN" count --db "$DB" --scope global 2>/dev/null)" \
+    "the awkward text survived being seeded"
+
+# The buffer stack must start empty, or a pre-existing buffer could be mistaken
+# for the copy. An empty stack makes show-buffer fail, which is the state the
+# assertion below needs to be able to distinguish from success.
+tm delete-buffer >/dev/null 2>&1
+assert_eq "" "$(tm show-buffer 2>/dev/null)" "the buffer stack starts empty"
+
+client=$(nested_client)
+if [ -z "$client" ]; then
+    bad "could not manufacture an attached client, so y is unproven"
+else
+    popup_state() { # want -> echoes yes|no
+        local i seen
+        for i in $(seq 40); do
+            if tm capture-pane -p -t outer 2>/dev/null | grep -q 'ZZCOPYZZ'; then seen=yes; else seen=no; fi
+            [ "$seen" = "$1" ] && break
+            sleep 0.25
+        done
+        printf '%s' "$seen"
+    }
+
+    tm send-keys -t outer C-l >/dev/null 2>&1
+    opened=$(popup_state yes)
+    assert_eq "yes" "$opened" "C-l opens the popup with the task on screen"
+
+    if [ "$opened" != "yes" ]; then
+        # Guarded for the same reason closekey-9's reopen leg is: against a build
+        # where y does nothing, an unopened popup would otherwise report a
+        # cheerful pass for an assertion that never ran.
+        printf '    -- skipped the y check: the popup never opened\n'
+    else
+        tm send-keys -t outer y >/dev/null 2>&1
+
+        # Poll for the buffer rather than sleeping a guessed interval: the copy is
+        # a subprocess spawned from inside the popup's event loop.
+        got=''
+        for _ in $(seq 40); do
+            got=$(tm show-buffer 2>/dev/null)
+            [ -n "$got" ] && break
+            sleep 0.25
+        done
+        assert_eq "$COPY_TEXT" "$got" "y put the task text in the tmux buffer, byte for byte"
+
+        # The confirmation is on screen too, and on the title's row. Grepped for
+        # one word: capture-pane -pe interleaves escapes between words, so a
+        # multi-word grep finds nothing even when the phrase is visible.
+        #
+        # POLLED, not captured once. The loop above breaks the moment the tmux
+        # buffer fills, and the buffer is filled by the copy subprocess — which
+        # returns *before* Bubble Tea has handled the resulting message and
+        # repainted. Capturing at that instant is a race, and it lost: the first
+        # version of this case failed here with the buffer already correct.
+        cap=''
+        for _ in $(seq 40); do
+            cap=$(tm capture-pane -p -t outer 2>/dev/null)
+            case "$cap" in *"copied:"*) break ;; esac
+            sleep 0.25
+        done
+        assert_contains "$cap" "copied:" "the popup confirms the copy on the title line"
+        # The notice REPLACES the title, so the title must be gone. Without this
+        # the assertion above would also pass for a notice rendered on a new row
+        # — which is the frame-overflow shape this repo has shipped three times.
+        assert_absent "$cap" "│  tdo " "the notice replaced the title rather than taking a row"
+        printf '    -- capture with the notice up:\n'
+        printf '%s\n' "$cap" | grep -n 'copied:' | head -2 | sed 's/^/       /'
+
+        tm send-keys -t outer q >/dev/null 2>&1
+        assert_eq "no" "$(popup_state no)" "q closes the popup afterwards"
+    fi
+fi
+case_end
+fi
+
 # ============================================================== rename hook
 
 # The section that exists because everything above it can pass while the shipped

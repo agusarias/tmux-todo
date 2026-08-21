@@ -126,6 +126,22 @@ type Config struct {
 	// each mode's own key switch, so a CloseKey that collides with `a` or `d`
 	// keeps doing its old job and simply does not close.
 	CloseKey string
+	// Copy puts a string on the clipboard. Injected for the same reason Jump
+	// is delegated to internal/cli: the copy is a subprocess (or a raw escape
+	// written to the tty) and this package runs neither. The difference from
+	// Jump is that this one fires *during* the popup rather than at exit,
+	// because the confirmation on the title line is part of the feature — so
+	// it is a func here rather than an intent handed back by Run.
+	//
+	// Nil is fine and means copying is unavailable: `y` is then completely
+	// inert, no call and no message. It is deliberately not defaulted to
+	// anything — this package cannot know whether tmux is around, which is the
+	// whole point of the seam.
+	//
+	// The argument is the task's text verbatim. Whatever the notice does to it
+	// for display (collapsing whitespace) must never reach here: the payload is
+	// what somebody is about to paste.
+	Copy func(string) error
 }
 
 // closesOn reports whether msg is the configured close key.
@@ -241,6 +257,21 @@ type Model struct {
 	// owns the tmux and sesh invocations — and which runs them only after the
 	// queued deletes have committed, because Enter closes the popup.
 	jump Jump
+
+	// notice is the one-shot message that replaces the title line: the `y`
+	// copy's confirmation, or its failure. It is cleared by the *next*
+	// keypress rather than by a timer — a tea.Tick would buy nothing a
+	// keypress does not and would have to be faked in every test that renders
+	// a frame.
+	//
+	// A reload must not clear it. Another pane writing a task triggers one, and
+	// a confirmation that vanished because something else happened would read
+	// as "the copy did not take".
+	notice string
+	// noticeErr styles the notice as a failure. Kept beside the text rather
+	// than encoded into it (a "copy failed:" prefix match) so the two cannot
+	// disagree.
+	noticeErr bool
 
 	width  int
 	height int
@@ -422,6 +453,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 
+	case copiedMsg:
+		return m.copied(msg), nil
+
 	case deletesCommittedMsg:
 		// Quit *in response to* the commit finishing, rather than racing it:
 		// tea.Quit issued alongside the commit could take effect first.
@@ -438,6 +472,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Before dispatch, never after: the keypress that *sets* a notice has
+		// to survive its own turn, and the next one has to clear it. Clearing
+		// afterwards would wipe the confirmation `y` just produced.
+		m.notice, m.noticeErr = "", false
 		switch m.mode {
 		case modeNormal:
 			return m.updateNormal(msg)
@@ -498,6 +536,9 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		return m.toggleDone()
+
+	case "y":
+		return m.copySelected()
 
 	case "1":
 		return m.toggleFilter(task.ScopeSession)
@@ -778,6 +819,19 @@ func clampHeight(frame string, height int) string {
 func (m Model) titleLine() string {
 	const name = "tdo"
 	width := m.contentWidth()
+	// The notice replaces the title rather than taking a row of its own. That
+	// is the whole reason it is safe: this line is already exactly one row and
+	// already truncated, so chromeHeight does not change. A new row would be a
+	// different, riskier change — see the three frame bugs in CLAUDE.md.
+	if m.notice != "" {
+		style := hintStyle
+		if m.noticeErr {
+			style = errStyle
+		}
+		// oneLine before truncate: truncate clips columns, and only this clips
+		// rows. See copy.go's oneLine for why the collapse lives here.
+		return style.Render(truncate(oneLine(m.notice), width))
+	}
 	if m.filter == "" {
 		return titleStyle.Render(truncate(name, width))
 	}
