@@ -1,6 +1,6 @@
 # Close The Popup With The Same Hotkey That Opens It
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -437,3 +437,46 @@ run 4: plugin harness: 188 passed, 0 failed
    end on a prefix install.
 9. **`make test`, `make lint`, `make test-plugin` green** — done, and a pre-existing harness flake
    was fixed rather than left to rot.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All nine DoD items check out. Re-verified
+on `main` rather than from the Evidence section alone: `make lint` clean, `go
+test ./...` green across five packages, `make test-plugin` **188 passed, 0
+failed**.
+
+**Two deviations from the approved plan, both accepted, both the right call.**
+
+1. **`popupKey` asks Bubble Tea instead of tabulating.** The plan named
+   `ctrl+space` as the likely disagreement and it was real: `C-Space` is
+   `ctrl+@`, `C-i` is `tab`, `C-m` is `enter`. A hand table would have got all
+   three wrong and each would have shipped as "the popup just never closes".
+2. **`isTextKey` replaces the plan's literal `msg.Type != tea.KeyRunes`.** That
+   check was one case short in each direction — `tea.KeySpace` is not `KeyRunes`
+   (a `@todo-key` of `Space` would quit instead of typing a space) and an
+   Alt-modified rune *is* `KeyRunes` (an alt close key silently did nothing).
+   Mutants B and C pin both directions, and Mutant C is the proof the deviation
+   was necessary rather than stylistic.
+
+**Accepted with the user's eyes open: one pre-existing behaviour change.**
+`field.go` now routes `handleKey` through `isTextKey`, so `alt+<rune>` no longer
+inserts a bare letter into the input row — it had done that since the field was
+written. Outside this task's DoD, and kept: reverting it would also break an alt
+close key in the input row.
+
+**DoD 3's premise was corrected, not scoped out.** tmux rejects `C-l'x` as an
+invalid key *name*, quote or not; `'`, `"`, `M-'` and `C-"` are all real bindable
+keys and the DoD holds as written against all four. The right instinct — the
+premise was wrong, the requirement was not.
+
+**A pre-existing harness flake was fixed on the way past** (`seed_session_task`
+raced an interactive shell about one run in three; seeding is now the pane's own
+command). It corrects a CLAUDE.md claim from the session-renamed task: `$TMUX_PANE`
+*is* set for a pane's initial command — the probe behind the old claim only echoed
+the first variable back. The rename mutation proof still discriminates, so the
+determinism was not bought by making those cases vacuous.
+
+The `?` overlay still does not mention the close key, per the brief's own
+decision — the footer/overlay width trap makes a variable-length key name there a
+separate task.
+
