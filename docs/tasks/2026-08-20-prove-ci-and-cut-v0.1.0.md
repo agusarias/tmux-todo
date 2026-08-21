@@ -540,3 +540,57 @@ this environment. A masked PATH cannot prove the absence of things nobody though
 container would also have shown whether the install needs anything beyond tmux, curl and git.
 That leg is unrun, and the run above is what stands in its place.
 
+**Update, same day: the container leg DID run.** The image finished building after the caveat
+above was written (registry egress was slow, not blocked), so both legs exist and the caveat is
+retained only as the record of the order things happened in.
+
+### Step 7, container leg: intrinsic sandbox — 11 passed, 0 failed
+
+`debian:stable-slim` (Debian 13 trixie, linux/aarch64) with tmux, curl and git and **no Go
+toolchain of any kind** — asserted three ways, including that no Go install exists off-PATH,
+which a masked PATH cannot show.
+
+```
+== container facts
+    kernel    : Linux/aarch64
+    distro    : Debian GNU/Linux 13 (trixie)
+    tmux      : tmux 3.5a
+== the sandbox is INTRINSIC: this image never had a Go toolchain
+    ok   no go anywhere on PATH
+    ok   no tdo anywhere on PATH
+    ok   no Go install on the filesystem at all
+    ok   sha256sum exists, so the checksum path really runs
+    ok   cloned the public repo the way TPM would
+    ok   the fresh clone has no bin/tdo
+    ok   the plugin installed bin/tdo after 0s — by download, since no build is possible here
+    ok   prefix t is bound to display-popup, exactly once
+    version   : v0.1.0
+    file      : ELF 64-bit LSB executable, ARM aarch64, statically linked
+    published : ad9e23fc3034defc5a7a6cde51c888bd0b6e165a42db1dbd33a0fc2101c4137b
+    computed  : ad9e23fc3034defc5a7a6cde51c888bd0b6e165a42db1dbd33a0fc2101c4137b
+    ok   byte-for-byte the published tdo-linux-arm64
+    ok   add and list work
+    tdo v0.1.0 · runtime go1.25.0 linux/arm64 · schema 2 (latest 2) · journal wal · ok
+    ok   prefix t opened the popup and the task is on screen
+    -- 8:  ││  ▸ ◉ ZZCONTAINERZZ from the release asset    (global)  ││
+----------------------------------------
+step 7 (container): 11 passed, 0 failed
+```
+
+**Three things this leg proves that the masked-PATH run could not.**
+
+1. **The `tdo-linux-arm64` asset had never been executed by anyone.** The release workflow
+   cross-compiled it and `verify` only ran the *native* one; CI's own jobs are amd64. This is the
+   first time that binary has run, and `doctor` reports `runtime go1.25.0 linux/arm64`, schema 2
+   and WAL — so the migrations and the pure-Go SQLite driver work on that platform rather than
+   merely compiling for it. `file` confirms **statically linked**, which is the
+   `CGO_ENABLED=0` promise checked on a Linux binary instead of via `otool`.
+2. **A third tmux version.** 3.7b on the dev machine, 3.4 on CI, **3.5a** here — and the
+   keybind, the `display-popup` branch and the nested-client capture all behave the same on all
+   three. Given that this project has now been bitten twice by version-dependent tmux behaviour
+   (`show-messages` on 3.4, the `C-"` key name), a third data point is worth more than the
+   intrinsic sandbox was.
+3. **The install needs nothing beyond tmux, curl and git.** A slim image with no Go, no build
+   tools and no `tdo` reached a working `prefix t` from a clone in under a second of plugin time.
+   That is the actual user this release exists for, and it is now a measured claim.
+
