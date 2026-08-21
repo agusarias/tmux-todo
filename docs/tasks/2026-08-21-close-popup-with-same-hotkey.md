@@ -1,7 +1,7 @@
 # Close The Popup With The Same Hotkey That Opens It
 
 **Status:** review
-**Worktree:** ../todo-close-popup-hotkey
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 Pressing the popup's own hotkey while the popup is open closes it. With the
@@ -223,8 +223,8 @@ is corrected rather than deleted.
 ## Evidence
 
 Verified in `../todo-close-popup-hotkey` on tmux 3.7b, go 1.26, darwin/arm64,
-bubbletea v1.3.10. Merged into local `main` as **MERGEHASH**; the feature commit is
-**FEATUREHASH**.
+bubbletea v1.3.10. Merged into local `main` as **29f60da**; the feature commit is
+**5edffe3**.
 
 ### DoD 1 — the whole chain, end to end
 
