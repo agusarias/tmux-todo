@@ -1,7 +1,7 @@
 # Completed Rows Stay Visible For 24h, Grouped At The End Of Their Tier
 
-**Status:** in-progress
-**Worktree:** ../todo-done-24h
+**Status:** review
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 A task completed within the last 24h is visible in the popup whenever you arrive — not only
@@ -184,6 +184,14 @@ log rather than lost.
   a zero value rather than panicking or silently sorting it first.
 
 ## Evidence
+
+**Merged into local `main` as `673684e`** (branch `done-24h`, work commit `d548868`). Not
+pushed. Read the diff with `git show 673684e` or `git log -1 -p d548868`; the worktree is gone.
+`make lint` and `go test ./...` were re-run on the merge result, green.
+
+**Note for the review: this commit changes `docs/design.md`** — a deliberate product change made
+on the user's instruction, per DoD 12. That file and `internal/tui/donerows.go` are the two worth
+reading line by line.
 
 ### The real frame (the check that has caught three bugs)
 
