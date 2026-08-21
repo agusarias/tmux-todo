@@ -1,6 +1,6 @@
 # Completed Rows Stay Visible For 24h, Grouped At The End Of Their Tier
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -363,3 +363,41 @@ redone so it compiles.
 - **`done_at` ties are resolved by the store's order, not by anything this task chose.** Two
   rows completed in the same second keep their newest-first sequence (the sort is stable). That
   is deliberate and is why the tests stamp distinct timestamps rather than relying on it.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All thirteen DoD items check out, re-verified on `main`:
+`make lint` clean, `go test ./...` green, and
+`git diff d548868^ d548868 -- internal/cli internal/store internal/scope` **empty** — the task
+touched none of them, which is DoD 11's real content.
+
+**The `design.md` amendment is accepted as written.** It states the 24h-since-completion rule and
+the end-of-tier placement, quotes the previous sentence **verbatim**, and records why it changed —
+including that the old wording made `store.DoneRetention` dead code in effect. A spec change that
+keeps its own history is the right shape for this repo, where `design.md` outranks any brief.
+
+**The real-frame capture is what carries this review.** One 80x20 capture shows pending-then-done
+within each tier, `done_at` DESC inside the done block (a 1h-old row above a 2h-old one, the
+*opposite* of their id order, so the store's ordering demonstrably did not produce it), tier
+labels and tier order intact, no separator rows, the 25h row absent from the view and present in
+the database, and a frame that fits the pane exactly.
+
+**Three things worth carrying forward.**
+
+1. **A vacuous test became a real one.** CLAUDE.md recorded `TestCursorReAnchorsOnTaskID` as
+   passing with the implementation deleted, because completing a row did not use to reorder
+   anything. It now fails under the id-anchor mutation. Worth knowing that the vacuity of a test
+   is a property of the behaviour around it, not of the test alone — and worth re-checking the
+   other tests that note says nothing about.
+2. **A mutation that does not build is not evidence.** The first `completedAfter` mutation left an
+   unused import, so the run produced no failures at all — indistinguishable from "no test covers
+   this". Redone so it compiled. This belongs in the same family as every other vacuity trap here.
+3. **The frame fixture now fatals if fewer than 40 rows load**, so the 27-of-40-done seeding
+   cannot silently age out and leave the size sweep proving nothing.
+
+**Limits accepted as stated:** rows older than 24h still accumulate invisibly (`store.PurgeDone`
+still has no caller, deliberately, per `design.md`); the capture check is one size and one
+seeding, with the 9-size sweep living in `TestFrameNeverExceedsThePane`; and `done_at` ties keep
+the store's newest-first order via a stable sort, which is why the tests stamp distinct
+timestamps rather than relying on it.
+
