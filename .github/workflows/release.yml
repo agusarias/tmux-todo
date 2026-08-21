@@ -111,14 +111,27 @@ jobs:
       # trust path of the thing users download. The tag already exists (it is
       # what triggered this run), so `gh release create` only creates the
       # release object and uploads the assets.
+      # A tag carrying a pre-release suffix (`v0.1.0-rc.1`, `v0.0.1-test`) is
+      # published as a PRERELEASE, and that is load-bearing rather than tidy:
+      # `tmux-todo.tmux` installs from /releases/latest/download/<asset>, and
+      # GitHub's "latest" is the most recent release that is NOT a prerelease.
+      # Without this, cutting any release candidate would silently become the
+      # binary every installed plugin downloads at its next tmux server start.
+      # Semver's own rule decides: a hyphen after the version core means
+      # pre-release.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          case ${GITHUB_REF_NAME} in
+            *-*) pre=--prerelease; echo "pre-release tag: not eligible to be /releases/latest" ;;
+            *)   pre=;            echo "final tag: this becomes /releases/latest" ;;
+          esac
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
+            ${pre:+$pre} \
             tdo-darwin-arm64 tdo-darwin-amd64 tdo-linux-amd64 tdo-linux-arm64 \
             checksums.txt
           gh release view "${GITHUB_REF_NAME}" --json assets \
