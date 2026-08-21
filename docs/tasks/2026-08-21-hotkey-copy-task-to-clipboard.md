@@ -1,7 +1,7 @@
 # Copy The Selected Task To The Clipboard With `y`
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-copy-to-clipboard
 
 ## Goal
 Pressing `y` in the popup copies the selected task's text to the clipboard, and the popup says
