@@ -1,6 +1,6 @@
 # Query A Named Scope: `tdo list --session backend`
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -474,3 +474,27 @@ disposable to be standing.
 11. **The JSON golden still matches byte-for-byte** — done, and the file is unmodified.
 12. **Suites, gofmt, static build** — done. **CI on the push is outstanding**, and belongs to
     the curator: the executor does not push.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All twelve DoD items check out as the
+Evidence section records them, re-verified on `main`: `go test ./internal/cli/`
+is `ok` and the stray `internal/cli/--json` database is gone from the tree.
+
+**The wider dash guard is accepted as ruled.** Putting it in `splitArgs` rather
+than in the two new flags means `--db --json` and `--scope --json` are usage
+errors now too. That is a behaviour change beyond this task's letter, taken
+deliberately: the hazard belongs to "this flag consumes the next token", which is
+what `takesValue` already answers, and the narrower fix would have left
+`--scope --json` failing with `unknown scope "--json"` — the right outcome for
+the wrong reason, diverging from `--session`'s message over time.
+
+**DoD 12's CI leg is closed out as the user's, not the task's.** Everything CI
+runs is green locally (`make lint`, `make test`, `make test-plugin`, `gofmt`,
+static build) and this change is `internal/cli`-only, so the cross-compile matrix
+is untouched. `main` is unpushed by design — the executor never pushes.
+
+Lessons already landed in CLAUDE.md by the executor (the stdlib-`flag`
+reordering hazard and its dash-token consequence; a test whose failure mode is
+creating a file needs somewhere disposable to stand). Nothing further to add.
+
