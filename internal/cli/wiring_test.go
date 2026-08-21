@@ -51,6 +51,11 @@ type wiringFixture struct {
 	// sticky is the preference seeded into the state dir before the run, or ""
 	// for none.
 	sticky task.ScopeKind
+	// stickyView is the view preference seeded into the state dir before the
+	// run. It is deliberately `true` in the main fixture, because `false` is
+	// both the zero value of the field and what a *missing* preference reads
+	// as — an assertion against false would pass with the wiring deleted.
+	stickyView bool
 	// popupKey is the raw @todo-key the plugin would have put in the popup's
 	// environment, or "" for "no TDO_POPUP_KEY at all".
 	//
@@ -117,6 +122,11 @@ func (f *wiringFixture) install(t *testing.T) *wiringFixture {
 		// under test here is runTUI's wiring, not scope's round trip.
 		if err := (scope.Resolver{StateDir: f.stateDir}).SetStickyDefault(f.sticky); err != nil {
 			t.Fatalf("seed sticky default: %v", err)
+		}
+	}
+	if f.stickyView {
+		if err := (scope.Resolver{StateDir: f.stateDir}).SetStickyAllTasks(true); err != nil {
+			t.Fatalf("seed sticky view: %v", err)
 		}
 	}
 
@@ -346,6 +356,56 @@ var wiringChecks = map[string]wiringCheck{
 		}
 	},
 
+	// The stored view preference must reach the popup. The fixture seeds `true`
+	// precisely because `false` is the zero value AND what an unreadable file
+	// degrades to, so an assertion against false would pass with the wiring line
+	// deleted — the same vacuous-environment trap CloseKey documents for $TMUX.
+	"AllTasks": func(t *testing.T, _ string, cfg tui.Config, f *wiringFixture) {
+		if !f.stickyView {
+			t.Fatal("the fixture seeds no view preference, so this assertion could not fail")
+		}
+		if !cfg.AllTasks {
+			t.Error("AllTasks = false with the all-tasks view stored — the popup would open" +
+				" in the merged list and `g` would be a keystroke on every open again")
+		}
+	},
+
+	// Behavioural, not non-nil — the SetSticky rule. A stub that does nothing is
+	// non-nil and is exactly the bug worth catching, so this writes through the
+	// injected func and reads it back with a fresh Resolver.
+	"SetAllTasks": func(t *testing.T, _ string, cfg tui.Config, f *wiringFixture) {
+		if cfg.SetAllTasks == nil {
+			t.Fatal("SetAllTasks is nil — the view would silently stop being remembered")
+		}
+		// The neighbouring scope preference is read BEFORE the write and
+		// compared after, rather than against the value the fixture seeded:
+		// wiringChecks runs as subtests over a map, so the SetSticky entry may
+		// already have rewritten it. Comparing against a seeded constant made
+		// this check fail on iteration order, which is a property of the test
+		// and not of the code.
+		all := scope.Resolved{
+			Session: &task.Scope{Kind: task.ScopeSession, Key: "any"},
+			Dir:     &task.Scope{Kind: task.ScopeDir, Key: "/any"},
+			Global:  task.Scope{Kind: task.ScopeGlobal},
+		}
+		scopeBefore := (scope.Resolver{StateDir: f.stateDir}).StickyDefault(all)
+
+		// Write the value the fixture did NOT seed, so a no-op setter fails.
+		want := !f.stickyView
+		if err := cfg.SetAllTasks(want); err != nil {
+			t.Fatalf("SetAllTasks(%v): %v", want, err)
+		}
+		if got := (scope.Resolver{StateDir: f.stateDir}).StickyAllTasks(); got != want {
+			t.Errorf("after SetAllTasks(%v) the state dir reads back %v — the write did not land",
+				want, got)
+		}
+		// ...and it must not have disturbed the scope preference beside it.
+		if got := (scope.Resolver{StateDir: f.stateDir}).StickyDefault(all); got != scopeBefore {
+			t.Errorf("writing the view changed the stored scope default from %q to %q",
+				scopeBefore, got)
+		}
+	},
+
 	// Behavioural, not non-nil — same rule as SetSticky, and for the same
 	// reason: `func(string) error { return nil }` is non-nil and is precisely
 	// the bug shape worth catching. What is asserted is that the injected Copy
@@ -414,10 +474,11 @@ func TestEveryTUIConfigFieldIsAsserted(t *testing.T) {
 // built, checked against the environment the fixture set up.
 func TestTUIConfigWiring(t *testing.T) {
 	f := (&wiringFixture{
-		session:  "work",
-		live:     []string{"work", "spare"},
-		sticky:   task.ScopeDir,
-		popupKey: "C-l",
+		session:    "work",
+		live:       []string{"work", "spare"},
+		sticky:     task.ScopeDir,
+		stickyView: true,
+		popupKey:   "C-l",
 	}).install(t)
 
 	cfg := runTUIAndCaptureConfig(t, f)
@@ -552,5 +613,44 @@ func TestTUIConfigWiringIgnoresAnUntranslatableKey(t *testing.T) {
 
 	if cfg.CloseKey != "" {
 		t.Errorf("CloseKey = %q for an unsupported key name, want empty", cfg.CloseKey)
+	}
+}
+
+// TestTUIConfigWiringWithNoStoredView is the other direction of DoD 7: a state
+// dir that has never seen this preference must open the merged list.
+//
+// Its companion in wiringChecks proves `true` reaches the popup; this one proves
+// runTUI actually produces `false` from an absent file rather than the assertion
+// there passing on a zero value it never set.
+func TestTUIConfigWiringWithNoStoredView(t *testing.T) {
+	f := (&wiringFixture{session: "work", live: []string{"work"}, sticky: task.ScopeDir}).install(t)
+
+	cfg := runTUIAndCaptureConfig(t, f)
+
+	if cfg.AllTasks {
+		t.Error("AllTasks = true with no stored preference, want the merged list")
+	}
+	if cfg.SetAllTasks == nil {
+		t.Error("SetAllTasks is nil — a first-time user's view would never be remembered")
+	}
+}
+
+// TestTUIConfigWiringWithACorruptStoredView — a preference file holding junk must
+// degrade to the merged list, through the real wiring rather than only through
+// internal/scope's own unit test. This is the "a corrupt one-word file must never
+// stop the popup from opening" rule, asserted at the level a user would feel it.
+func TestTUIConfigWiringWithACorruptStoredView(t *testing.T) {
+	f := (&wiringFixture{session: "work", live: []string{"work"}, sticky: task.ScopeDir}).install(t)
+	if err := os.MkdirAll(f.stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(f.stateDir, "default-view"), []byte("\x00garbage"), 0o644); err != nil {
+		t.Fatalf("seed a corrupt preference: %v", err)
+	}
+
+	cfg := runTUIAndCaptureConfig(t, f)
+
+	if cfg.AllTasks {
+		t.Error("AllTasks = true for a corrupt preference file, want the merged list")
 	}
 }

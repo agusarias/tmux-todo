@@ -1445,6 +1445,109 @@ fi
 case_end
 fi
 
+# ========================================================== sticky all-tasks
+
+# DoD 1 for the sticky-view task: the whole loop, nothing stubbed. Open the
+# popup, press g, quit, reopen — and the popup is ALREADY in the all-tasks view.
+# Then the reverse, so "it is sticky" is not confused with "it always opens wide".
+#
+# The discriminator is the string "GLOBAL": the all-tasks view renders a group
+# header "- GLOBAL -" (uppercased tier), while the merged list writes the tier as
+# a lowercase "(global)" label. So an uppercase match means the wide view is on
+# screen and nothing else does.
+#
+# XDG_STATE_HOME is set on the SERVER, via case_start, for the same reason the
+# rename cases set XDG_DATA_HOME there: a display-popup child inherits the tmux
+# server's environment, not this harness's — so exporting it here would leave the
+# popup writing the DEVELOPER'S real view preference. That is a safety
+# requirement, and the case asserts the server really carries it.
+if [ -z "$TDO_BIN" ]; then
+    printf '\n== sticky-1 SKIPPED: no usable go toolchain to build tdo with.\n'
+    printf '   This is the only case that proves the preference survives a popup.\n'
+else
+case_start sticky-1-the-all-tasks-view-is-remembered \
+    XDG_DATA_HOME=$TMPROOT/sticky-1-the-all-tasks-view-is-remembered/xdg \
+    XDG_STATE_HOME=$TMPROOT/sticky-1-the-all-tasks-view-is-remembered/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+STATE=$CASEDIR/state/tmux-todo
+cp "$TDO_BIN" "$PATHDIR/tdo"
+tm set-option -g @todo-key-table root >/dev/null 2>&1
+tm set-option -g @todo-key C-l >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for C-l root)" "the root C-l binding is installed"
+
+# The safety assertion: without this the popup writes the developer's own file.
+assert_contains "$(tm show-environment -g XDG_STATE_HOME 2>/dev/null)" \
+    "$CASEDIR/state" "the SERVER's environment carries the sandbox XDG_STATE_HOME"
+
+mkdir -p "$(dirname "$DB")"
+env -u TMUX "$TDO_BIN" add --db "$DB" --global 'ZZSTICKYZZ' >/dev/null 2>&1
+assert_no_file "$STATE/default-view" "no view preference exists to begin with"
+
+client=$(nested_client)
+if [ -z "$client" ]; then
+    bad "could not manufacture an attached client, so stickiness is unproven"
+else
+    # popup_showing <canary> -> yes|no, polled so the assertions wait for the
+    # popup rather than sleeping a guessed interval.
+    popup_showing() { # want needle
+        local i seen
+        for i in $(seq 40); do
+            if tm capture-pane -p -t outer 2>/dev/null | grep -q "$2"; then seen=yes; else seen=no; fi
+            [ "$seen" = "$1" ] && break
+            sleep 0.25
+        done
+        printf '%s' "$seen"
+    }
+
+    # --- first popup: opens merged, switch to all-tasks, quit.
+    tm send-keys -t outer C-l >/dev/null 2>&1
+    opened=$(popup_showing yes ZZSTICKYZZ)
+    assert_eq "yes" "$opened" "C-l opens the popup"
+    assert_eq "no" "$(popup_showing no GLOBAL)" "the first popup opens in the MERGED list"
+
+    if [ "$opened" != "yes" ]; then
+        printf '    -- skipped the rest: the popup never opened\n'
+    else
+        tm send-keys -t outer g >/dev/null 2>&1
+        assert_eq "yes" "$(popup_showing yes GLOBAL)" "g switches to the all-tasks view"
+        tm send-keys -t outer q >/dev/null 2>&1
+        assert_eq "no" "$(popup_showing no ZZSTICKYZZ)" "q closes it"
+
+        # The write happened on quit, to the sandbox, with the expected content.
+        assert_file "$STATE/default-view" "quitting wrote a view preference"
+        assert_eq "all" "$(cat "$STATE/default-view" 2>/dev/null | tr -d '[:space:]')" \
+            "and it records the all-tasks view"
+
+        # --- THE assertion: the next popup opens wide, with no g pressed.
+        tm send-keys -t outer C-l >/dev/null 2>&1
+        assert_eq "yes" "$(popup_showing yes ZZSTICKYZZ)" "C-l reopens the popup"
+        reopened=$(popup_showing yes GLOBAL)
+        assert_eq "yes" "$reopened" "the SECOND popup opens in the all-tasks view, with no g pressed"
+        printf '    -- capture on reopen:\n'
+        tm capture-pane -p -t outer 2>/dev/null | grep -n 'GLOBAL\|ZZSTICKYZZ' | head -3 | sed 's/^/       /'
+
+        # --- and the reverse, so this is stickiness rather than "always wide".
+        if [ "$reopened" = "yes" ]; then
+            tm send-keys -t outer g >/dev/null 2>&1
+            assert_eq "no" "$(popup_showing no GLOBAL)" "g switches back to the merged list"
+            tm send-keys -t outer q >/dev/null 2>&1
+            assert_eq "no" "$(popup_showing no ZZSTICKYZZ)" "q closes it again"
+            assert_eq "" "$(cat "$STATE/default-view" 2>/dev/null | tr -d '[:space:]')" \
+                "the preference now records the merged list"
+
+            tm send-keys -t outer C-l >/dev/null 2>&1
+            assert_eq "yes" "$(popup_showing yes ZZSTICKYZZ)" "C-l opens the popup a third time"
+            assert_eq "no" "$(popup_showing no GLOBAL)" "and it opens in the MERGED list again"
+            tm send-keys -t outer q >/dev/null 2>&1
+        else
+            printf '    -- skipped the reverse leg: the reopen was not in the all-tasks view\n'
+        fi
+    fi
+fi
+case_end
+fi
+
 # ============================================================== rename hook
 
 # The section that exists because everything above it can pass while the shipped

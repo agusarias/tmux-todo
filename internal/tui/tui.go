@@ -142,6 +142,24 @@ type Config struct {
 	// for display (collapsing whitespace) must never reach here: the payload is
 	// what somebody is about to paste.
 	Copy func(string) error
+	// AllTasks is the view the popup opens in: true for the all-tasks view,
+	// false for the merged list. It is read from the state dir by internal/cli,
+	// because this package must not know where preferences live — the same seam
+	// DefaultScope arrives through.
+	//
+	// The zero value is the merged list, which is also what an absent or corrupt
+	// preference file degrades to. That is deliberate: a preference must never be
+	// a reason the popup opens somewhere surprising, and "false on anything I
+	// could not read" needs no error path.
+	AllTasks bool
+	// SetAllTasks persists which view the popup was in when it closed, so the
+	// next one opens there. The pair to AllTasks, exactly as SetSticky is to
+	// DefaultScope.
+	//
+	// Called once per popup, from quit(), and its error is dropped: the popup's
+	// job is not to trade the user's exit for a preference file. Nil is fine and
+	// means "do not remember".
+	SetAllTasks func(bool) error
 }
 
 // closesOn reports whether msg is the configured close key.
@@ -298,6 +316,13 @@ func New(cfg Config) Model {
 		view:   viewMerged,
 		width:  defaultWidth,
 		height: defaultHeight,
+	}
+	// Before Init(), never after: Init issues the first query, and the two views
+	// query different things (List vs ListGrouped). Setting the view afterwards
+	// would render one frame of the merged list and then swap, which is both a
+	// visible flicker and a wasted query on the popup's cold-start path.
+	if cfg.AllTasks {
+		m.view = viewAll
 	}
 	m.vp = viewport.New(m.contentWidth(), m.listHeight())
 	return m
@@ -561,6 +586,22 @@ func (m Model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // every user who never presses `d` takes.
 func (m Model) quit() (tea.Model, tea.Cmd) {
 	m.quitting = true
+	// First, and synchronously, because quit() has two exits and this must
+	// happen on both. Hanging the persist off commitDeletesCmd would save the
+	// view only for users who had pressed `d` — the early return below is
+	// the common path, not the rare one.
+	//
+	// Synchronous rather than a tea.Cmd for the same reason: a command would
+	// have to be sequenced against tea.Quit and against commitDeletesCmd, and
+	// that sequencing is exactly where the bug would live. It is one small
+	// write on a path that is already exiting.
+	//
+	// The error is dropped deliberately, and nothing is printed: a preference
+	// that failed to save must not fail the quit or scribble on the frame the
+	// user is leaving. Same rule the sticky scope default already follows.
+	if m.cfg.SetAllTasks != nil {
+		_ = m.cfg.SetAllTasks(m.view == viewAll)
+	}
 	if len(m.queued) == 0 {
 		return m, tea.Quit
 	}
