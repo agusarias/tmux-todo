@@ -1,7 +1,7 @@
 # The All-Tasks View Is Sticky Across Popup Sessions
 
-**Status:** in-progress
-**Worktree:** ../todo-sticky-view
+**Status:** review
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 Close the popup while the all-tasks view (`g`) is up, and the next popup opens in it. Close it
@@ -187,6 +187,10 @@ an entry for each, which is the forcing function.
   rather than assume, since a missing liveness map would show every session as dead.
 
 ## Evidence
+
+**Merged into local `main` as `9234ed6`** (branch `sticky-view`, work commit `92e443b`). Not
+pushed. Read the diff with `git show 9234ed6` or `git log -1 -p 92e443b`; the worktree is gone.
+`make lint` and `go test ./...` were re-run on the merge result, green.
 
 ### DoD 1 — the whole loop, end to end, nothing stubbed
 
