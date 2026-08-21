@@ -101,6 +101,36 @@ proves the two round-trip independently.
   sequenced with `tea.Quit` and with `commitDeletesCmd`, which is where the "only saved when you
   pressed `d`" bug lives.
 
+- **2026-08-21 (executor)** — the atomic temp-plus-rename write was **extracted** into
+  `writeStateFile` rather than copied for the second file. Both preferences live in the same
+  directory and both are read by code that treats a malformed file as absent, so "the write is
+  atomic" has to be a property of the mechanism, not of each caller remembering it. The plan
+  said "same write pattern"; one function is the honest reading of that.
+- **2026-08-21 (executor)** — `SetStickyAllTasks(false)` **writes an empty file** rather than
+  removing it. Removal would behave identically on read (absent and empty both mean the merged
+  list), but a write keeps this one code path and leaves the mtime telling the truth about when
+  the choice was last made.
+- **2026-08-21 (executor)** — the wiring fixture seeds the view preference as **`true`**. `false`
+  is both the field's zero value *and* what an unreadable file degrades to, so an assertion
+  against `false` would pass with the wiring line deleted — the same vacuous-environment trap
+  `CloseKey` documents for `$TMUX`. The `false` and corrupt-file directions get their own tests
+  (`TestTUIConfigWiringWithNoStoredView`, `...WithACorruptStoredView`).
+- **2026-08-21 (executor)** — the `SetAllTasks` wiring check reads the neighbouring scope
+  preference **before** its write and compares after, rather than against the value the fixture
+  seeded. `wiringChecks` runs as subtests over a **map**, so the `SetSticky` entry may already
+  have rewritten it; the first version of this check failed on iteration order, which is a
+  property of the test rather than of the code.
+- **2026-08-21 (executor)** — the harness case sets `XDG_STATE_HOME` on the **server** via
+  `case_start`, and asserts it before pressing anything. A `display-popup` child inherits the
+  server's environment, so exporting it in a pane would have left the popup rewriting the
+  developer's real preference on every run. Same trap the rename cases document for
+  `XDG_DATA_HOME`; now recorded in CLAUDE.md for popup cases too.
+- **2026-08-21 (executor)** — confirmed rather than assumed, per the plan's last worry: opening
+  straight into the all-tasks view needs **no new resolution**. `LiveSessions` is already
+  resolved on every popup open (`runTUI` calls `e.resolver.LiveSessions()` unconditionally), so
+  the wide view's `(live)` / `(not running)` labels are correct on the first frame. The
+  end-to-end capture on reopen shows a correctly rendered group header.
+
 ## Plan
 Approved at Checkpoint 1, 2026-08-21.
 
@@ -155,3 +185,142 @@ an entry for each, which is the forcing function.
 - *The all-tasks view needing more Config than the merged list.* `LiveSessions` is resolved on
   every open already, so opening straight into the wide view needs no new resolution — confirm
   rather than assume, since a missing liveness map would show every session as dead.
+
+## Evidence
+
+### DoD 1 — the whole loop, end to end, nothing stubbed
+
+`test/plugin_install_test.sh`'s new `sticky-1-the-all-tasks-view-is-remembered`: the real plugin
+installs the real bind, the real binary runs in a real `display-popup` on a manufactured nested
+client, and `g`/`q`/reopen are pressed with `send-keys`. The discriminator is the string
+`GLOBAL` — the all-tasks view renders a `─ GLOBAL ─` group header, while the merged list writes
+the tier as a lowercase `(global)` label, so an uppercase match means the wide view and nothing
+else does.
+
+```
+== sticky-1-the-all-tasks-view-is-remembered
+    ok   the root C-l binding is installed
+    ok   the SERVER's environment carries the sandbox XDG_STATE_HOME
+    ok   no view preference exists to begin with
+    ok   C-l opens the popup
+    ok   the first popup opens in the MERGED list
+    ok   g switches to the all-tasks view
+    ok   q closes it
+    ok   quitting wrote a view preference
+    ok   and it records the all-tasks view
+    ok   C-l reopens the popup
+    ok   the SECOND popup opens in the all-tasks view, with no g pressed
+    -- capture on reopen:
+       8:         ││  ─ GLOBAL ─                                            ││
+       9:         ││  ▸ ZZSTICKYZZ                                          ││
+    ok   g switches back to the merged list
+    ok   q closes it again
+    ok   the preference now records the merged list
+    ok   C-l opens the popup a third time
+    ok   and it opens in the MERGED list again
+```
+
+Both directions are in there deliberately: without the reverse leg, "it is sticky" and "it
+always opens wide" look identical. The `XDG_STATE_HOME` assertion is a **safety** check, not a
+tidiness one — a `display-popup` child inherits the *server's* environment, so without it the
+case would have rewritten the developer's own preference file on every run.
+
+### Mutation proofs
+
+Four, all run, all discriminating.
+
+| Mutation | Result |
+|---|---|
+| **Persist moved below the empty-queue early return** (the plan's named hazard, DoD 3) | `TestQuitPersistsTheView` fails all 4 legs (`SetAllTasks called 0 times, want exactly 1`), `TestQuitPersistsOnBothQuitPaths` fails, **and** the harness fails: `quitting wrote a view preference (… default-view missing)` |
+| Constructor ignores `Config.AllTasks` (DoD 9) | `TestConfigAllTasksPicksTheOpeningView` fails: `New gave view 0, want all-tasks=true` and `group headers present = false, want true` |
+| `runTUI` stops reading/writing the preference (DoD 7) | `TestTUIConfigWiring/AllTasks` and `/SetAllTasks` both fail: `AllTasks = false with the all-tasks view stored`, `the write did not land` |
+| The view shares `default-scope`'s file (DoD 6) | `TestStickyViewAndScopeAreIndependent` fails: `writing the scope default cleared the stored view preference`, `state dir holds [default-scope], want exactly the two preference files` |
+
+The first is the one the plan asked for by name, and it is worth reading twice: the unit tests
+*and* the end-to-end case both catch it. A popup with nothing queued is the common path, so that
+bug would have shipped as "the view is only remembered if you happened to press `d`".
+
+### DoD-by-DoD
+
+1. **End to end** — above, both directions, with its mutation proof.
+2. **Written on quit, not on toggle** — `TestTogglingTheViewPersistsNothing` presses
+   `g g g j 1 g` and asserts the setter is untouched after *each* keystroke, then that the
+   following `q` writes exactly once (so it is not passing by the setter never being called at
+   all). `TestQuitPersistsTheView` covers the four toggle states.
+3. **Both quit paths** — `TestQuitPersistsOnBothQuitPaths` asserts the empty-queue leg
+   explicitly (fataling if the queue is not actually empty, so the leg cannot drift into
+   testing the other path) and the queued leg, checking the delete commit still runs.
+   Mutation-proven twice over.
+4. **A failing setter still quits and still commits** — `TestPersistFailureStillQuitsAndStillCommits`:
+   the model is quitting, the command is the delete commit, the commit reports no error, **the
+   rows are actually gone from the database** (`store.ErrNotFound`), nothing about the failure
+   reaches `View()`, and `m.err` is untouched.
+5. **Missing / empty / junk → merged list** — `TestStickyAllTasksUnreadableMeansMergedList`
+   covers 10 cases: missing, empty, whitespace, junk, the *other* file's vocabulary (`global`),
+   a near-miss (`alll`), wrong case (`ALL`), binary, a directory where the file goes, and an
+   unusable state dir. It ends with a **positive control** — a file holding `all` must read as
+   true — so the table cannot pass vacuously, plus the trailing-newline form the setter writes.
+   `TestTUIConfigWiringWithACorruptStoredView` asserts the same through the real wiring.
+6. **The two files are independent** — `TestStickyViewAndScopeAreIndependent` writes each,
+   checks the other is undisturbed in both orders, flips one back, and asserts the state dir
+   holds *exactly two* files (which also catches a leaked temp file from a non-atomic write).
+   Mutation-proven.
+7. **Exactly two Config fields, both really asserted** —
+   `TestEveryTUIConfigFieldIsAsserted` failed for both the moment they were added, as the plan
+   predicted. `AllTasks` is asserted against a seeded `true` (never `false`, which is the zero
+   value); `SetAllTasks` is behavioural — it writes through the injected func and reads back
+   with a fresh `Resolver`, and checks the neighbouring scope preference is unchanged. Every
+   fixture points `XDG_STATE_HOME` and `StateDir` at temp dirs.
+8. **`internal/tui` still does not import `internal/scope`** — `TestTUIDoesNotImportScope`
+   parses every `.go` file in the package with `go/parser` and fails on the import. It carries
+   its own **positive control** (a sentinel import that *is* present must be found), so a typo
+   in the forbidden path cannot make it pass forever, and it fatals if it parsed zero files.
+9. **The first frame is the right one** — `TestConfigAllTasksPicksTheOpeningView` checks
+   `New`'s view *before* `Init()`, then runs the first query and asserts the groups came back
+   (and that they did **not** in the merged case), then that group headers are present in
+   `m.rows` exactly when expected. Mutation-proven.
+10. **Sweep** — below.
+
+### DoD 10 — sweep
+
+```
+$ make lint
+go vet ./...
+
+$ gofmt -l .
+(empty)
+
+$ make test
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	0.818s
+ok  	github.com/agusarias/tmux-todo/internal/scope	0.711s
+ok  	github.com/agusarias/tmux-todo/internal/store	1.075s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.906s
+ok  	github.com/agusarias/tmux-todo/internal/tui	7.332s
+
+$ make test-plugin
+plugin harness: 213 passed, 0 failed        # 197 before this task
+
+$ make build && otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+# no libsqlite3 — the static build holds
+
+$ git diff --stat internal/cli/testdata/
+(empty — the list --json golden is untouched)
+```
+
+### Not verified / limits
+
+- **Two popups open at once: last quit wins.** Anticipated by the plan, nothing to fix, and not
+  tested — there is no ordering to assert, only a write that happens to be second. Worth
+  knowing rather than worth guarding.
+- **A popup killed uncleanly leaves the previous preference.** Deliberate, and the same
+  behaviour queued deletes already have: both fail towards not changing the user's state. Not
+  separately tested, because "the process died before reaching `quit()`" has no seam.
+- **The preference is global**, not per session or per directory — out of scope per the brief.
+- **The write is not fsynced.** It is a temp-file-plus-rename, which is atomic against a crash
+  mid-write; a power loss immediately after the rename could still lose it. Consistent with the
+  existing `default-scope` file, and a preference is the kind of thing the design already says
+  the user can lose without losing anything of theirs.

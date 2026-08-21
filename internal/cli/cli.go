@@ -174,6 +174,13 @@ func runTUI(args []string, stderr io.Writer) int {
 		// `scope.Resolver{}` would reintroduce the zero-value tmux-blindness
 		// bug. See copy.go for the invocation table.
 		Copy: newCopier(e.resolver.TmuxEnv != ""),
+		// Which view the last popup closed in, and where to record this one's.
+		// Off the same resolver as DefaultScope/SetSticky — one construction
+		// site, so the zero-value tmux-blindness bug has no second place to
+		// reappear. An unreadable preference reads as false, which is the
+		// merged list.
+		AllTasks:    e.resolver.StickyAllTasks(),
+		SetAllTasks: e.resolver.SetStickyAllTasks,
 	}
 	jump, err := runTUIProgram(cfg)
 	if err != nil {

@@ -27,7 +27,8 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `migrations/NNN_*.sql` run by `migrate.go`. Environment-blind by design: it
   takes `task.Scope` values and never asks tmux or the filesystem anything.
 - `internal/scope` — pane → scope resolution (`Resolver`/`Resolved`), the pure-Go
-  git root walker, and the sticky default kind. Injectable: tests need neither a
+  git root walker, and the two sticky preferences (the default scope kind and the
+  popup's opening view). Injectable: tests need neither a
   tmux server nor a git checkout. Three ways to ask tmux about a session, and the
   differences are load-bearing: `Resolve` (untargeted — needs a client, so never
   from a hook), `SessionID(name)` (targeted by `=name:`) and `EnvSession`
@@ -124,6 +125,19 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   *amending `docs/design.md`* (the old wording specified the behaviour being removed). A
   constant that exists, is tested, and is unreachable in production is not caught by any test
   that injects around it — the tests all froze the clock *and* set `openedAt`.
+- **Two sticky preferences, two files, one state dir.** `default-scope` holds the add-default
+  kind; `default-view` holds `all` when the popup should open in the all-tasks view. Separate
+  files rather than two words in one, so a parse change to either can never eat the other —
+  `TestStickyViewAndScopeAreIndependent` asserts both directions and that the dir ends up
+  holding exactly two files (a leaked temp file from a non-atomic write shows up there too).
+  `writeStateFile` is the one atomic temp-plus-rename writer both go through.
+- **The popup's view is persisted on quit, synchronously, at the TOP of `quit()`.** Not on each
+  `g` (an accidental toggle would move the preference) and not from a `tea.Cmd` (it would have
+  to be sequenced against `tea.Quit` *and* `commitDeletesCmd`). The load-bearing detail is that
+  `quit()` has **two exits** — it returns early when the delete queue is empty, which is the
+  path almost every popup takes — so anything hung off the delete-commit command saves the
+  preference only for users who pressed `d`. That mutation is proven to fail both in
+  `TestQuitPersistsOnBothQuitPaths` and end-to-end in the harness.
 - **`d` in the popup queues; the DELETE runs at close.** `u` un-hides rather than
   re-inserts, which is the only way the row comes back with its original id, timestamp and
   position (`store.Add` would assign new ones and move it to the top of its tier). The costs
@@ -425,6 +439,12 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   sandbox PATH and sandbox only the binaries under test — then assert the sandbox really
   lacks them, so the suite fails loudly instead of degrading if `tdo` or `go` shows up in
   `/usr/bin` later.
+- **A `display-popup` child inherits the SERVER's environment too, so popup cases need
+  `XDG_STATE_HOME` set at `case_start`** — exactly like the hook children below. The popup now
+  *writes* a preference file on quit, so a case that exported the variable in a pane instead
+  would have the popup rewriting the **developer's own** view preference. `sticky-1` asserts
+  `show-environment -g XDG_STATE_HOME` before pressing anything, for the same reason the rename
+  cases assert `XDG_DATA_HOME`. Safety requirement, not tidiness.
 - **A tmux hook child inherits the SERVER's environment — not a pane's, and not the
   harness's.** So `XDG_DATA_HOME` exported in a pane, or in the shell that sends keys, does not
   reach it: `tdo session-renamed` opens `store.DefaultPath()`, i.e. **the developer's real
