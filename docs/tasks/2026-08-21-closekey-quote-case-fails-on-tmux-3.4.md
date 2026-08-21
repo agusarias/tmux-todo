@@ -1,7 +1,7 @@
 # `closekey-6-quote-in-key-ctrl-quote` Fails On tmux 3.4 (CI Red)
 
-**Status:** in-progress
-**Worktree:** ../todo-closekey-quote-probe
+**Status:** review
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 `make test-plugin` is green on ubuntu's tmux 3.4 as well as the dev machine's 3.7b, without
@@ -146,6 +146,11 @@ they are the only evidence that distinguishes this fix from asking less.
   guards for one question is how the next reader learns the wrong reason.
 
 ## Evidence
+
+**Merged into local `main` as `a9c3648`** (branch `closekey-quote-probe`, work commit
+`8355777`). Not pushed. Read the diff with `git show a9c3648` or `git log -1 -p 8355777`; the
+worktree is gone. `make lint`, `go test ./...` and `make test-plugin` (197/0) were all re-run on
+the merge result, green.
 
 ### Scope (Constraints)
 
