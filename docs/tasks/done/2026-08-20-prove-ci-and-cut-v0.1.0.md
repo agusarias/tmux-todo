@@ -1,6 +1,6 @@
 # Prove CI And Cut v0.1.0
 
-**Status:** agreed
+**Status:** done
 **Worktree:** none
 
 ## Goal
@@ -593,4 +593,35 @@ step 7 (container): 11 passed, 0 failed
 3. **The install needs nothing beyond tmux, curl and git.** A slim image with no Go, no build
    tools and no `tdo` reached a working `prefix t` from a clone in under a second of plugin time.
    That is the actual user this release exists for, and it is now a measured claim.
+
+## Close-out (curator, 2026-08-21)
+
+Closed on 2026-08-21. All nine DoD items are satisfied and evidenced above, including **both**
+legs of step 7 — the masked-PATH run (12/0) and the intrinsic-sandbox container run (11/0).
+
+**What this task was actually for.** It exists because a workflow that has never run is not
+evidence, and it earned that framing twice over. CI's first run ever failed, and both failures
+were this repo's own anti-vacuity guards refusing to run tests that would prove nothing — the
+tmux-less assertion firing on a runner that ships tmux (which is how DoD 2 got a *real*
+experiment instead of a contrived one), and the plugin sandbox refusing to pretend it controlled
+`go` resolution. The release workflow then turned out to publish every release as "latest",
+including release candidates, which would have silently made any RC the binary every installed
+plugin downloads at its next tmux server start. All three were latent and permanent, and none
+would have been found by reading the YAML.
+
+**The tag point was chosen, not defaulted to.** When step 6 came due, `main` carried an
+unreviewed feature on top of a CI-green commit. The user chose to review it, push, re-run CI and
+tag everything, so `v0.1.0` = `b8dbf9e` with six features each through a Checkpoint 2.
+
+**Lessons folded into CLAUDE.md**: three tmux versions now have evidence and each has moved
+behaviour (probe the running tmux, never compare `tmux -V`); a cross-compiled asset nothing has
+executed is not evidence (`tdo-linux-arm64` shipped never having run); and a masked PATH cannot
+prove the absence of what nobody thought to mask.
+
+**Follow-ups deliberately not taken here:** nothing purges completed rows (`store.PurgeDone`
+still has no caller, per `design.md`), and `session-renamed` opens the store before resolving the
+session, so a hook firing on a machine that has never run `tdo` creates an empty database. Both
+are recorded, neither is a release blocker.
+
+**v0.1.0 is public**: https://github.com/agusarias/tmux-todo/releases/tag/v0.1.0
 

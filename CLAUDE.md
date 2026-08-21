@@ -399,6 +399,28 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - **Popup percentages are of the *client*, and the popup's border costs 2×2.** `-w 60 -h 15`
   hands the TUI a 58×13 pane; `-w 60% -h 60%` on an 80×24 client hands it 46×12. Use
   `#{client_width}`/`#{client_height}` in the size condition, not `window_*`.
+- **Three tmux versions now have evidence, and each one has moved.** 3.7b on the dev machine,
+  **3.4** on CI's ubuntu runner, **3.5a** in the `debian:stable-slim` container the v0.1.0
+  install was proven in. Two bugs have already been version-dependent — `show-messages` cannot
+  observe a `display-message` on a client-less 3.4 server, and `C-"` is not a bindable key name
+  there — so "works on this tmux" is never "works". The harness answers both by *probing the
+  running tmux* (a capability probe at startup, a `bind-key` probe per key name) and skipping
+  loudly, never by comparing `tmux -V`: a version comparison encodes today's guess about which
+  release changed what and goes stale silently.
+- **A cross-compiled release asset that nothing has executed is not evidence.**
+  `release.yml`'s `verify` step runs only the *native* asset and CI's own jobs are amd64, so
+  `tdo-linux-arm64` shipped in v0.1.0 having never run anywhere. Running it in an aarch64
+  container is what proved the migrations and the pure-Go SQLite driver work on that platform
+  rather than merely compiling for it (`doctor` → schema 2, journal wal; `file` → statically
+  linked, which is the `CGO_ENABLED=0` promise checked without `otool`). Do the same for any new
+  release target.
+- **A masked PATH cannot prove the absence of what nobody thought to mask.** Sandboxing by
+  symlinking every system binary *except* the ones under test (by wildcard, never a curated
+  list) is the right tool on a developer machine and is what `test/plugin_install_test.sh` does.
+  But it only removes what it was told to: the container leg of the v0.1.0 install check also
+  asserted no Go install exists *off* PATH, and that the whole install needs nothing beyond
+  tmux, curl and git. When the claim is "this works on a bare machine", the sandbox has to be
+  intrinsic.
 - **The popup overlay *can* be captured headlessly, with a nested client.** CLAUDE.md used
   to say otherwise. `display-popup` needs an attached client, and one can be manufactured:
   create two sessions, run `TMUX= tmux -L <sock> attach -t work` *inside* the first
