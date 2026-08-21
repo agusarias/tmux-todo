@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -72,6 +73,13 @@ type wiringFixture struct {
 	// running*. runTUI closes the database on its way out, so a check made
 	// after the run can only ever see a closed handle.
 	dbProbe error
+	// copyCalls records what the Config's Copy actually ran, and copyTTYBuf
+	// what it wrote to the terminal. Both seams are substituted for the whole
+	// test, so the Copy check can prove the injected func reaches tmux rather
+	// than merely being non-nil — and so no test can put a task on the
+	// developer's real clipboard.
+	copyCalls  *[]copyCall
+	copyTTYBuf *strings.Builder
 }
 
 func (f *wiringFixture) install(t *testing.T) *wiringFixture {
@@ -111,6 +119,12 @@ func (f *wiringFixture) install(t *testing.T) *wiringFixture {
 			t.Fatalf("seed sticky default: %v", err)
 		}
 	}
+
+	// Substituted before the run and for the whole test: the Copy assertion
+	// calls cfg.Copy after runTUI returns, and a live copyRunner there would
+	// shell out to tmux and overwrite the developer's paste buffer.
+	f.copyCalls = fakeCopyRunner(t)
+	f.copyTTYBuf = fakeTTY(t, nil)
 
 	restore := newResolver
 	t.Cleanup(func() { newResolver = restore })
@@ -331,6 +345,39 @@ var wiringChecks = map[string]wiringCheck{
 				" Bubble Tea key strings, so this would never fire", cfg.CloseKey)
 		}
 	},
+
+	// Behavioural, not non-nil — same rule as SetSticky, and for the same
+	// reason: `func(string) error { return nil }` is non-nil and is precisely
+	// the bug shape worth catching. What is asserted is that the injected Copy
+	// really loads a tmux buffer, with the text on stdin, because the fixture
+	// is inside tmux.
+	"Copy": func(t *testing.T, _ string, cfg tui.Config, f *wiringFixture) {
+		if cfg.Copy == nil {
+			t.Fatal("Copy is nil — y would be inert in the popup")
+		}
+		const text = `it's a "$HOME" task`
+		if err := cfg.Copy(text); err != nil {
+			t.Fatalf("Copy(%q): %v", text, err)
+		}
+		calls := *f.copyCalls
+		if len(calls) != 1 {
+			t.Fatalf("Copy made %d runs, want 1: %+v", len(calls), calls)
+		}
+		got := calls[0]
+		want := []string{"load-buffer", "-w", "-"}
+		if got.name != "tmux" || !reflect.DeepEqual(got.args, want) {
+			t.Errorf("Copy ran %q %v, want tmux %v", got.name, got.args, want)
+		}
+		if got.stdin != text {
+			t.Errorf("stdin = %q, want the text verbatim %q", got.stdin, text)
+		}
+		// Inside tmux the buffer is the whole path; an OSC 52 write here would
+		// mean the branch read the environment wrongly.
+		if f.copyTTYBuf.Len() != 0 {
+			t.Errorf("Copy also wrote %q to the terminal; inside tmux it must not",
+				f.copyTTYBuf.String())
+		}
+	},
 }
 
 // TestEveryTUIConfigFieldIsAsserted is the guard that keeps wiringChecks
@@ -412,6 +459,33 @@ func TestTUIConfigWiringOutsideTmux(t *testing.T) {
 	}
 	if got, want := cfg.LiveSessions, f.wantLive(); !reflect.DeepEqual(got, want) {
 		t.Errorf("LiveSessions = %v, want %v — liveness does not depend on being inside tmux", got, want)
+	}
+
+	// The other half of the copy branch. wiringChecks asserts the in-tmux path;
+	// without this leg a runTUI that always returned loadBuffer would pass
+	// every assertion in the suite, and `y` from a plain shell would be a dead
+	// key that reported success.
+	if cfg.Copy == nil {
+		t.Fatal("Copy is nil outside tmux — y would be inert in a hand-run `tdo tui`")
+	}
+	const text = `it's a "$HOME" task`
+	if err := cfg.Copy(text); err != nil {
+		t.Fatalf("Copy(%q) outside tmux: %v", text, err)
+	}
+	if calls := *f.copyCalls; len(calls) != 0 {
+		t.Errorf("Copy ran tmux %d times outside tmux: %+v", len(calls), calls)
+	}
+	escape := f.copyTTYBuf.String()
+	if escape == "" {
+		t.Fatal("Copy wrote nothing to the terminal outside tmux")
+	}
+	payload := strings.TrimSuffix(strings.TrimPrefix(escape, "\x1b]52;c;"), "\a")
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatalf("the escape %q does not carry a base64 payload: %v", escape, err)
+	}
+	if string(decoded) != text {
+		t.Errorf("the escape's payload decodes to %q, want %q", decoded, text)
 	}
 }
 

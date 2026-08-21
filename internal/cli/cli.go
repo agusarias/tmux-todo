@@ -168,6 +168,12 @@ func runTUI(args []string, stderr io.Writer) int {
 		// `tdo tui`, or a prefix-table install where the chord cannot reach the
 		// popup — translates to "", meaning no close key.
 		CloseKey: popupKey(os.Getenv(popupKeyEnv)),
+		// The `y` copy. Which of the two paths applies is decided here, from
+		// the same resolver everything else in this struct comes off — the
+		// popup must not learn whether tmux exists, and a second
+		// `scope.Resolver{}` would reintroduce the zero-value tmux-blindness
+		// bug. See copy.go for the invocation table.
+		Copy: newCopier(e.resolver.TmuxEnv != ""),
 	}
 	jump, err := runTUIProgram(cfg)
 	if err != nil {
