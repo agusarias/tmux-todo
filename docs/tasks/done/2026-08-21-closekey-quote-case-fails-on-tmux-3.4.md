@@ -1,6 +1,6 @@
 # `closekey-6-quote-in-key-ctrl-quote` Fails On tmux 3.4 (CI Red)
 
-**Status:** review
+**Status:** done
 **Worktree:** none (merged; worktree removed)
 
 ## Goal
@@ -302,3 +302,38 @@ written before the clipboard task merged two harness assertions into `main`; see
   Decision anticipated. The fix does not depend on knowing: if 3.4 turns out to bind all four
   and the CI failure was the plugin's quoting after all, nothing skips and the case fails —
   which is the correct outcome and is what DoD 3's mutation demonstrates.
+
+## Close-out (curator, 2026-08-21)
+
+Approved at Checkpoint 2 on 2026-08-21. All eight DoD items check out, re-verified on `main`:
+the header reads `quote keys : this tmux binds [' " M-' C-"]; unbindable names skip`, the
+coverage case is present, and `make test-plugin` is **197 passed, 0 failed** with the only SKIP
+in the run being the pre-existing `wget=none`. `tmux-todo.tmux` is untouched, which is what keeps
+this a test-only change.
+
+**The four mutations are the reason this is approvable at all.** A change that makes a red suite
+green is indistinguishable from a change that asks less, unless someone proves the guard still
+bites: forced-positive on a genuinely invalid key FAILS rather than skips (3 failures), the
+plugin's quote guard removed FAILS on every bindable key (10 failures, zero skips, `closekey-7`
+included), and an all-unbindable probe FAILS the suite rather than quietly skipping four cases.
+
+**A real finding came out of DoD 4 and is worth carrying forward:** with the quote guard gone,
+`the keybind is still installed` still *passed* for `'` — tmux parsed the bind body anyway. The
+assertion that actually catches that regression is the `TDO_POPUP_KEY` count. The case is sharp
+only because it asserts both, which is an argument for keeping paired assertions even when one
+looks redundant.
+
+**Two executor deviations accepted, both better than the plan.** The probe gets its own server so
+one definition feeds both the header and the loop (the header cannot claim a key ran that did
+not); and `tmux_can_bind` **fails open**, so a broken probe makes every case run as before rather
+than turning the group into silent skips — the same failure this task exists to prevent, arriving
+by a different door.
+
+**And one thing deliberately not done:** the forced-probe mutations were run by temporarily
+editing the harness, not by adding an env-var override. A `TDO_FORCE_UNBINDABLE`-style backdoor
+would be a supported way to make CI assert less, and the vacuity guard catches an all-skip but
+not a single forced skip.
+
+DoD 8's "188 today" was stale by execution time (`main` had gained the clipboard task's harness
+assertions): baseline 196, total 197, nothing removed.
+
