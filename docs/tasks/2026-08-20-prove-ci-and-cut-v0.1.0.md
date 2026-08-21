@@ -416,3 +416,71 @@ v0.1.0
 - **Step 8 / DoD 8** — walk the README's install instructions verbatim and fix whatever does
   not work as written.
 
+### Step 8 (DoD 8): the README's install instructions, walked as written
+
+Every claim in `README.md`'s Install section was executed or checked against the code, rather
+than read. Nothing needed correcting.
+
+**The release-binary block, run verbatim** (the one most likely to be subtly wrong, since it
+pipes a grepped line into a checksum tool whose accepted format is stricter than it looks):
+
+```sh
+base=https://github.com/agusarias/tmux-todo/releases/latest/download
+asset=tdo-darwin-arm64
+curl -fsSLO "$base/$asset"
+curl -fsSLO "$base/checksums.txt"
+grep " $asset$" checksums.txt | shasum -a 256 -c -
+```
+```
+downloads: ok
+tdo-darwin-arm64: OK
+rc=0
+```
+
+So the `checksums.txt` the workflow writes and the `grep`/`shasum -c` pair the README documents
+really do line up. `tdo --version` printing the release tag (`v0.1.0`) was confirmed at step 6.
+
+**The from-source block, on a fresh clone of the public repo:**
+
+```
+$ git clone https://github.com/agusarias/tmux-todo && cd tmux-todo && make build
+$ ./bin/tdo --version
+v0.1.0-1-g7366878
+```
+
+Works with no local state — the pushed tree builds standalone. The version is a `git describe`
+rather than a bare tag because `main` is one commit past `v0.1.0`; the README only promises the
+tag for the *release binary* path, so this is correct rather than a defect.
+
+**Claims checked against the code instead of the prose:**
+
+- `TDO_RELEASE_BASE_URL` is real, not aspirational documentation — `tmux-todo.tmux:45`
+  (`RELEASE_BASE=${TDO_RELEASE_BASE_URL:-...}`).
+- "`go` 1.25 or newer" matches `go.mod`'s `go 1.25.0`.
+- The four documented asset names are exactly the four the release published.
+- The two option defaults the comments claim (`@todo-key` = `t`, `@todo-key-table` = `prefix`)
+  match `install_keybind`.
+
+### Step 7 (DoD 7): in progress, and how it is being done
+
+Docker is available on this machine, so the "no `go` on `PATH`" condition is being made **real**
+rather than arranged: a `debian:stable-slim` container with tmux, curl and git and no Go
+toolchain at all, doing a TPM-style `git clone` of the public repo and letting the plugin's
+step-3 download install the binary from the real release. The script asserts the sandbox first
+(`command -v go` must fail, `command -v tdo` must fail, `sha256sum` must exist so the checksum
+path can actually run) — otherwise the whole case would pass for the wrong reason, which is the
+trap this harness has hit before with a shadowed PATH.
+
+It then asserts: a fresh clone has no `bin/tdo`; a server started from a config that
+`run-shell`s the plugin installs one; `prefix t` is bound to `display-popup`; the binary reports
+`v0.1.0`; its SHA-256 equals the published `checksums.txt` entry for `tdo-linux-arm64`
+(**byte-for-byte proof it is the release asset and not a local build**); `add`/`list` work; and
+the popup opens on `prefix t` with a manufactured nested client.
+
+**Not yet run:** the first attempt timed out at 10 minutes doing `apt-get install` inside the
+container, and pre-building the image has been stalled pulling `debian:stable-slim` from Docker
+Hub. Nothing about the plugin is implicated — this is image-pull throughput. If Docker Hub stays
+unreachable the fallback is the CI plugin job's approach (mask `go` out of the system directories
+on this machine and assert it is really absent), which loses "the sandbox is intrinsic" but keeps
+the real download, the real checksum and the real keybind.
+
