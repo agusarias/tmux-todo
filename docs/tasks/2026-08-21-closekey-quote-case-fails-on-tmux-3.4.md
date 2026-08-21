@@ -1,7 +1,7 @@
 # `closekey-6-quote-in-key-ctrl-quote` Fails On tmux 3.4 (CI Red)
 
-**Status:** ready
-**Worktree:** none
+**Status:** in-progress
+**Worktree:** ../todo-closekey-quote-probe
 
 ## Goal
 `make test-plugin` is green on ubuntu's tmux 3.4 as well as the dev machine's 3.7b, without
