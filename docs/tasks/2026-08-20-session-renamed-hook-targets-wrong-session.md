@@ -1,7 +1,7 @@
 # The session-renamed Hook Resolves The Wrong Session
 
 **Status:** review
-**Worktree:** ../todo-session-renamed-hook
+**Worktree:** none (merged; worktree removed)
 
 ## Goal
 `tdo session-renamed`, **when run as a `run-shell` hook child**, must act on the session the
@@ -219,7 +219,8 @@ known-able-to-fail rather than assumed to be.
 ## Evidence
 
 Verified in `../todo-session-renamed-hook` on tmux 3.7b, go 1.26 (`/opt/homebrew/bin/go`),
-darwin/arm64. Merge commit recorded at the end of this section.
+darwin/arm64. Merged into local `main` as **174f829** (`git show 174f829` / `git log -1 -p 174f829`); the
+feature commit itself is `fc7d462`.
 
 ### DoD 1 + 3 — a test that fires the real hook, with a bystander
 
