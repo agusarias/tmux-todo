@@ -62,18 +62,31 @@ func TestSpaceTogglesBothDirections(t *testing.T) {
 	}
 }
 
-// TestSpaceKeepsTheRowVisibleAndInPlace — the design's core feel requirement:
-// the row must not vanish under the cursor, and must not jump.
-func TestSpaceKeepsTheRowVisibleAndInPlace(t *testing.T) {
+// TestSpaceMovesTheRowToTheEndOfItsTierAndTheCursorFollows is DoD 7, and it
+// replaces TestSpaceKeepsTheRowVisibleAndInPlace.
+//
+// That test asserted the row "must not jump", which this task deliberately
+// changed: a completed row now moves to the end of its tier (the user's
+// placement call, 2026-08-21). What survives from it — and is the part the design
+// actually cares about — is that the row does not vanish from under the cursor.
+// So the requirement became "it moves, and the cursor moves with it", which is
+// what keeps space-again-to-undo working on the row you just acted on.
+//
+// The round trip is the whole assertion: complete, complete again, and the row is
+// back at its original index with its original id. A re-insert could not do that
+// (store.Add would mint a new id and put it on top), so this also pins that the
+// toggle stays a toggle.
+func TestSpaceMovesTheRowToTheEndOfItsTierAndTheCursorFollows(t *testing.T) {
 	db := openDB(t)
 	for _, text := range []string{"first", "second", "third"} {
 		add(t, db, text, globalScope)
 	}
 	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}})
 
-	// Put the cursor on the middle row.
+	// Newest-first, so the list is [third second first] and j lands on "second".
 	m = pressAndSettle(t, m, "j")
 	middle := m.tasks[m.cursor]
+	startIndex := m.cursor
 	if middle.Text != "second" {
 		t.Fatalf("cursor is on %q, expected the middle row", middle.Text)
 	}
@@ -83,14 +96,47 @@ func TestSpaceKeepsTheRowVisibleAndInPlace(t *testing.T) {
 	if got := texts(m.tasks); len(got) != 3 {
 		t.Fatalf("rows = %q, want all three still visible", got)
 	}
-	if m.tasks[1].ID != middle.ID {
-		t.Errorf("completing reordered the list: position 1 is now %q", m.tasks[1].Text)
+	// Moved to the end of the tier...
+	last := len(m.tasks) - 1
+	if m.tasks[last].ID != middle.ID {
+		t.Errorf("rows = %q, want the completed row %q last in its tier",
+			texts(m.tasks), middle.Text)
 	}
-	if !m.tasks[1].Done {
+	if !m.tasks[last].Done {
 		t.Error("the toggled row is not marked done")
 	}
+	// ...the pending rows keep their newest-first order above it...
+	if got := texts(m.tasks); got[0] != "third" || got[1] != "first" {
+		t.Errorf("pending rows = %q, want [third first] — completing must not reorder them", got[:2])
+	}
+	// ...the cursor went with it...
+	if got := m.tasks[m.cursor]; got.ID != middle.ID {
+		t.Errorf("cursor is on %q (id %d), want it to follow the completed row %q (id %d)",
+			got.Text, got.ID, middle.Text, middle.ID)
+	}
+	if m.cursor != last {
+		t.Errorf("cursor = %d, want %d (the end of the tier)", m.cursor, last)
+	}
+	// ...and it is still on screen, which is the requirement that predates this
+	// task and must survive it.
 	if !strings.Contains(m.View(), middle.Text) {
 		t.Errorf("the completed row vanished from the view:\n%s", m.View())
+	}
+
+	// The round trip: space again undoes the same row and it returns to where it
+	// was, with the id it always had.
+	m = pressSpace(t, m)
+	if mustGet(t, db, middle.ID).Done {
+		t.Fatal("the second press did not undo the same row")
+	}
+	if got := texts(m.tasks); got[startIndex] != middle.Text {
+		t.Errorf("after undo rows = %q, want %q back at index %d", got, middle.Text, startIndex)
+	}
+	if got := m.tasks[startIndex]; got.ID != middle.ID {
+		t.Errorf("the row came back as id %d, want its original %d", got.ID, middle.ID)
+	}
+	if got := m.tasks[m.cursor]; got.ID != middle.ID {
+		t.Errorf("after undo the cursor is on %q, want it still on %q", got.Text, middle.Text)
 	}
 }
 
@@ -176,26 +222,45 @@ func TestCursorClampsWhenAnchorLeavesTheView(t *testing.T) {
 	}
 }
 
-// TestDoneRowCompletedBeforeOpenIsHidden — a row already done when the popup
-// opened is not "reversible in the moment", so it starts out hidden.
-func TestDoneRowCompletedBeforeOpenIsHidden(t *testing.T) {
+// TestDoneRowCompletedBeforeOpenIsVisible is DoD 2, and it is the assertion this
+// task inverted.
+//
+// It used to be TestDoneRowCompletedBeforeOpenIsHidden and asserted the
+// opposite, because doneSince() took the later of "popup opened" and "now-24h" —
+// which made store.DoneRetention unreachable in practice and meant anything
+// completed before you arrived was already gone. docs/design.md was amended
+// (2026-08-21, user's instruction) to drop the openedAt clause; the old wording
+// is quoted in the task brief's Decisions log.
+//
+// The row is completed by a *different* popup session — this one is created
+// afterwards — which is the case the old rule could not show.
+func TestDoneRowCompletedBeforeOpenIsVisible(t *testing.T) {
 	db := openDB(t)
 	stale := add(t, db, "finished earlier", globalScope)
 	pending := add(t, db, "still to do", globalScope)
 	if err := db.Complete(context.Background(), stale.ID); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
+	done := mustGet(t, db, stale.ID)
 
-	// The popup opens a minute later.
-	open := time.Now().Add(time.Minute)
+	// A fresh popup, opening three hours after that completion.
+	open := done.DoneAt.Add(3 * time.Hour)
 	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Now: frozen(open)})
 
-	if got := texts(m.tasks); len(got) != 1 || got[0] != pending.Text {
-		t.Errorf("rows = %q, want only the pending task", got)
+	got := texts(m.tasks)
+	if len(got) != 2 {
+		t.Fatalf("rows = %q, want both the pending and the recently-done row", got)
 	}
-	// Hidden, never deleted.
-	if _, err := db.Get(context.Background(), stale.ID); err != nil {
-		t.Errorf("the hidden row left the database: %v", err)
+	// Pending first, done at the end of the tier — DoD 4 in its smallest form.
+	if got[0] != pending.Text || got[1] != stale.Text {
+		t.Errorf("rows = %q, want [%q %q]: pending first, done last",
+			got, pending.Text, stale.Text)
+	}
+	// Struck through, so "visible" does not read as "still to do". Asserted on
+	// the style object: a test process has no colour profile, so lipgloss
+	// renders plain text and an assertion over escapes would pass either way.
+	if !textStyle(m.tasks[1], false).GetStrikethrough() {
+		t.Error("the done row is not struck through, so it reads as pending")
 	}
 }
 
@@ -210,13 +275,9 @@ func TestDoneRowHiddenAfterRetentionWindow(t *testing.T) {
 	}
 	done := mustGet(t, db, added.ID)
 
-	// A popup opened long ago, so openedAt loses to the retention arm and the
-	// 24h boundary is the one actually doing the work.
-	openedLongAgo := done.DoneAt.Add(-time.Hour)
-	cfg := Config{DB: db, Scopes: []task.Scope{globalScope}, Now: frozen(openedLongAgo)}
-
-	m := New(cfg)
-	m.openedAt = openedLongAgo
+	// No openedAt to arrange any more: the 24h boundary is the only rule, so
+	// the clock is the whole input.
+	m := New(Config{DB: db, Scopes: []task.Scope{globalScope}, Now: frozen(*done.DoneAt)})
 
 	// Still inside the window: visible.
 	m.cfg.Now = frozen(done.DoneAt.Add(time.Hour))
@@ -237,20 +298,65 @@ func TestDoneRowHiddenAfterRetentionWindow(t *testing.T) {
 	}
 }
 
-// TestDoneSinceIsTheLaterBoundary pins the max() arithmetic in both directions.
-func TestDoneSinceIsTheLaterBoundary(t *testing.T) {
+// TestDoneSinceIsTheRetentionWindow is DoD 1: one retention window ago, and
+// nothing else. It replaces TestDoneSinceIsTheLaterBoundary, which pinned the
+// max() against openedAt that this task removed.
+//
+// The zero-value leg is the one worth having: with the field gone, a Model built
+// without ever opening still has to answer now-24h rather than something derived
+// from an uninitialised time.
+func TestDoneSinceIsTheRetentionWindow(t *testing.T) {
 	base := time.Unix(1_760_000_000, 0)
-
-	// Popup opened recently: openedAt wins over now-24h.
-	recent := Model{cfg: Config{Now: frozen(base)}, openedAt: base.Add(-time.Minute)}
-	if got, want := recent.doneSince(), base.Add(-time.Minute); !got.Equal(want) {
-		t.Errorf("with a fresh popup doneSince = %v, want the open time %v", got, want)
+	m := Model{cfg: Config{Now: frozen(base)}}
+	if got, want := m.doneSince(), base.Add(-store.DoneRetention); !got.Equal(want) {
+		t.Errorf("doneSince = %v, want %v (now - DoneRetention)", got, want)
 	}
+	// It must not depend on when the popup was built. New() stamped openedAt
+	// once; a doneSince that still consulted any such field would differ here.
+	built := New(Config{Now: frozen(base)})
+	if got, want := built.doneSince(), base.Add(-store.DoneRetention); !got.Equal(want) {
+		t.Errorf("after New, doneSince = %v, want %v — it must not depend on open time", got, want)
+	}
+}
 
-	// Popup left open for days: the retention window wins.
-	stale := Model{cfg: Config{Now: frozen(base)}, openedAt: base.Add(-72 * time.Hour)}
-	if got, want := stale.doneSince(), base.Add(-store.DoneRetention); !got.Equal(want) {
-		t.Errorf("with a long-open popup doneSince = %v, want the retention cutoff %v", got, want)
+// TestDoneVisibilityEdges is DoD 3 at both edges. A window asserted only in the
+// middle would pass with the comparison inverted or off by an hour.
+func TestDoneVisibilityEdges(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		since time.Duration
+		want  bool
+	}{
+		{"just completed", 0, true},
+		{"3h ago", 3 * time.Hour, true},
+		{"23h59m ago", 23*time.Hour + 59*time.Minute, true},
+		{"24h01m ago", 24*time.Hour + time.Minute, false},
+		{"25h ago", 25 * time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openDB(t)
+			row := add(t, db, "finished", globalScope)
+			if err := db.Complete(context.Background(), row.ID); err != nil {
+				t.Fatalf("Complete: %v", err)
+			}
+			done := mustGet(t, db, row.ID)
+
+			m := newLoaded(t, Config{
+				DB:     db,
+				Scopes: []task.Scope{globalScope},
+				Now:    frozen(done.DoneAt.Add(tc.since)),
+			})
+
+			visible := len(m.tasks) == 1
+			if visible != tc.want {
+				t.Errorf("completed %v ago: visible = %v, want %v (rows = %q)",
+					tc.since, visible, tc.want, texts(m.tasks))
+			}
+			// Never deleted, at either edge. This task reaps nothing.
+			if _, err := db.Get(context.Background(), row.ID); err != nil {
+				t.Errorf("the row left the database: %v", err)
+			}
+		})
 	}
 }
 

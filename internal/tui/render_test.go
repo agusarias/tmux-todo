@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -328,16 +329,59 @@ func TestLabelSurvivesALongDirKey(t *testing.T) {
 // clipped by it, which is how the label defect above hid. Hold every row to the
 // budget it was given.
 func TestRowsNeverExceedTheirWidth(t *testing.T) {
+	// Done rows are in the set for DoD 10 of the 24h-visibility task: they are
+	// now on screen whenever you arrive rather than only in the session that
+	// completed them, so their budget is no longer an edge case. Strikethrough
+	// is a style, not a character, so it must cost zero columns — this is the
+	// assertion that says so rather than assuming it.
+	done := row(strings.Repeat("struck ", 40), globalScope)
+	done.Done = true
+	stamped := time.Unix(1_760_000_000, 0)
+	done.DoneAt = &stamped
+
+	shortDone := row("finished this", sessionScope)
+	shortDone.Done = true
+	shortDone.DoneAt = &stamped
+
 	tasks := []task.Task{
 		row("a short one", sessionScope),
+		shortDone,
 		row(strings.Repeat("long ", 40), dirScope),
 		row("call the dentist", globalScope),
+		done,
 	}
 	for _, width := range []int{20, 40, 74, 80, 200} {
-		for i, r := range renderRows(tasks, renderOpts{Width: width, Home: "/Users/x", Cursor: 0}) {
-			if w := lipgloss.Width(r); w > width {
-				t.Errorf("width %d row %d is %d columns: %q", width, i, w, r)
+		// Every cursor position, because the selected row takes a different
+		// style path and a done+selected row is the combination this task makes
+		// reachable on arrival.
+		for cursor := range tasks {
+			for i, r := range renderRows(tasks, renderOpts{Width: width, Home: "/Users/x", Cursor: cursor}) {
+				if w := lipgloss.Width(r); w > width {
+					t.Errorf("width %d cursor %d row %d is %d columns: %q", width, cursor, i, w, r)
+				}
 			}
+		}
+	}
+}
+
+// TestStrikethroughCostsNoColumns is DoD 10's mechanism: the done marker is a
+// lipgloss style, so a done row and an identical pending one must occupy the
+// same width. If strikethrough ever became a prefix character instead, every
+// done row would be one column wider than its budget and the frame assertions
+// would start failing somewhere far from the cause.
+func TestStrikethroughCostsNoColumns(t *testing.T) {
+	pending := row("identical text here", globalScope)
+	finished := pending
+	finished.Done = true
+	stamped := time.Unix(1_760_000_000, 0)
+	finished.DoneAt = &stamped
+
+	for _, width := range []int{20, 40, 80} {
+		a := renderRows([]task.Task{pending}, renderOpts{Width: width, Home: "/Users/x", Cursor: -1})
+		b := renderRows([]task.Task{finished}, renderOpts{Width: width, Home: "/Users/x", Cursor: -1})
+		if lipgloss.Width(a[0]) != lipgloss.Width(b[0]) {
+			t.Errorf("width %d: pending row is %d columns, done row is %d — strikethrough must be free",
+				width, lipgloss.Width(a[0]), lipgloss.Width(b[0]))
 		}
 	}
 }

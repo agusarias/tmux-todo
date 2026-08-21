@@ -203,11 +203,6 @@ type Model struct {
 	// filter, i.e. the merged view over every active scope.
 	filter task.ScopeKind
 
-	// openedAt is when this popup opened. Rows completed before it were already
-	// done when the user arrived, so they are not "reversible in the moment"
-	// and start out hidden.
-	openedAt time.Time
-
 	// tasks are the rows on screen, flat and in screen order — the merged
 	// list's order, or the all-tasks view's groups concatenated. groups is the
 	// all-tasks view's shape of the same data.
@@ -298,12 +293,11 @@ type rowsMsg struct {
 // is issued by Init.
 func New(cfg Config) Model {
 	m := Model{
-		cfg:      cfg,
-		mode:     modeNormal,
-		view:     viewMerged,
-		openedAt: cfg.now(),
-		width:    defaultWidth,
-		height:   defaultHeight,
+		cfg:    cfg,
+		mode:   modeNormal,
+		view:   viewMerged,
+		width:  defaultWidth,
+		height: defaultHeight,
 	}
 	m.vp = viewport.New(m.contentWidth(), m.listHeight())
 	return m
@@ -327,20 +321,18 @@ func (m Model) activeScopes() []task.Scope {
 	return out
 }
 
-// doneSince is the boundary below which completed rows stop being shown:
-// whichever of "this popup opened" and "one retention window ago" is later.
+// doneSince is the boundary below which completed rows stop being shown: one
+// retention window ago, and nothing else.
 //
-// In practice openedAt almost always wins — the 24h arm only bites for a popup
-// left open longer than that — but docs/design.md specifies "whichever comes
-// first", and the arithmetic is cheap. The point of the rule is that a row you
-// completed just now stays under your cursor, struck through, while one you
-// completed yesterday is already gone when you arrive.
+// It used to be the *later* of this and "when the popup opened", which is what
+// docs/design.md asked for — and which made store.DoneRetention dead in
+// practice, since openedAt is later than now-24h for every popup not left open
+// for a day. So a row completed before you arrived was already gone, and the 24h
+// window never bit. design.md's "Completion vs deletion" section was amended
+// (2026-08-21) to drop the openedAt clause: 24h since completion is the whole
+// rule, and what the popup shows no longer depends on when it was opened.
 func (m Model) doneSince() time.Time {
-	retention := m.cfg.now().Add(-store.DoneRetention)
-	if m.openedAt.After(retention) {
-		return m.openedAt
-	}
-	return retention
+	return m.cfg.now().Add(-store.DoneRetention)
 }
 
 // reloadCmd re-runs the query and replaces the rows. Every action that changes
@@ -435,7 +427,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.groups = m.visibleGroups(msg.groups)
 			m.tasks = groupTasks(m.groups)
 		} else {
-			m.tasks = m.dropQueued(msg.tasks)
+			// partitionDone rides along here, at the same single point the
+			// queue filter does, so "done rows sit at the end of their tier"
+			// is structural for every reload rather than something each
+			// caller remembers. m.tasks is documented as screen order, and
+			// rebuildRows flattens it directly — so the re-order has to
+			// happen before that, not after.
+			m.tasks = partitionDone(m.dropQueued(msg.tasks))
 			m.groups = nil
 		}
 		m.err = msg.err

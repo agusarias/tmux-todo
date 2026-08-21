@@ -104,6 +104,35 @@ None of the classic kinds. Two real hazards, both in territory this repo has bee
      user just acted on, which is the only undo the product has.
   3. **No separator row.** Rows are the scarcest resource in the frame.
 
+- **2026-08-21 (executor)** — an **all-done tier must not short-circuit the sort**. The first
+  `appendTierPartitioned` returned early when a tier had nothing to move (`pending == 0 ||
+  pending == len(tier)`), which left an all-done tier in the store's id order instead of
+  `done_at` DESC. Caught by `TestPartitionDoneWithAnAllDoneTier`. Only the *no done rows* case
+  short-circuits now.
+- **2026-08-21 (executor)** — three existing tests asserted the behaviour this task changes and
+  were rewritten rather than deleted, with the old name and reason in each doc comment:
+  `TestDoneRowCompletedBeforeOpenIsHidden` → `...IsVisible` (the inverted product rule),
+  `TestDoneSinceIsTheLaterBoundary` → `TestDoneSinceIsTheRetentionWindow` (the `max()` is gone),
+  and `TestSpaceKeepsTheRowVisibleAndInPlace` → `TestSpaceMovesTheRowToTheEndOfItsTierAndThe
+  CursorFollows` (the row now *does* jump; what survives is that it stays on screen and the
+  cursor goes with it).
+- **2026-08-21 (executor)** — **the plan's question answered: `TestCursorReAnchorsOnTaskID` is
+  no longer vacuous.** CLAUDE.md recorded it as passing with the id anchor deleted, because
+  completing a row did not reorder. It now fails under that mutation, because completing a row
+  moves it. Both it and `TestCursorReAnchorsWhenRowsShift` stay; the generalisable point ("a
+  test can acquire or lose its teeth when the code around it changes, without being edited") is
+  now in CLAUDE.md.
+- **2026-08-21 (executor)** — `done_at`-order assertions through the model needed a
+  `stampDone` test helper writing the column via SQL. `store.Complete` stamps the store's
+  private clock, so two completions in one test land in the same second, `done_at` DESC becomes
+  a tie, and the stable sort resolves it by the store's id order — an assertion built that way
+  would have passed with the comparison deleted. The all-tasks test now completes rows in an
+  order that **contradicts** the id order, so the two cannot agree by accident.
+- **2026-08-21 (executor)** — CLAUDE.md's note that `[9m` is the strikethrough escape is wrong
+  and was corrected. SGR 9 arrives combined (`[2;9m` / `[0;9m`), so that grep answers zero for a
+  row that *is* struck through — which briefly looked like a real rendering bug in the
+  `capture-pane` check. The working pattern is `;9m`.
+
 ## Plan
 Approved at Checkpoint 1, 2026-08-21. `internal/tui` plus one `design.md` edit; no store, CLI or
 schema change.
@@ -153,3 +182,176 @@ log rather than lost.
   keep it from becoming a rendering bug.
 - *`done_at` null on a row marked done by an older code path.* Order by `done_at` must tolerate
   a zero value rather than panicking or silently sorting it first.
+
+## Evidence
+
+### The real frame (the check that has caught three bugs)
+
+`bin/tdo tui` in a plain 80x20 tmux pane, `$XDG_DATA_HOME` at a temp dir, schema from
+`tdo doctor --db`, rows seeded with `sqlite3` — the recipe from CLAUDE.md. Nine rows across
+three tiers: five pending, three done inside the window, one done 25h ago.
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  tdo                                                                         │
+│                                                                              │
+│  ▸ ⌘ check CI is green     (session: pulsar)                                 │
+│    ⌘ rebase onto main                                                        │
+│    ⌘ wrote the brief                                                         │
+│    ⌘ reviewed the PR                                                         │
+│    · update README         …_0n9sln4pn_2z50xz6w5nfh0000gn/T/tmp.Dj6LiuvRv8)  │
+│    · fixed the flaky test                                                    │
+│    ◉ call the dentist      (global)                                          │
+│    ◉ paid the invoice                                                        │
+│                                                                              │
+│  j/k move · space done · ? keys · q quit                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+   (blank body rows elided; the real capture is 20 rows)
+
+rows carrying SGR 9 (strikethrough):  4
+the 25h-old row ('aged out yesterday'): absent, correct
+frame rows: 20 (pane is 20)   <- fits exactly, no scroll
+```
+
+Everything the task asks for is visible in that one capture:
+
+- **Pending first, done at the end of each tier.** Session: `check CI`, `rebase` (pending),
+  then `wrote the brief`, `reviewed the PR` (done). Dir: `update README`, then
+  `fixed the flaky test`. Global: `call the dentist`, then `paid the invoice`.
+- **`done_at` DESC inside the done block.** `wrote the brief` (1h ago) sits above
+  `reviewed the PR` (2h ago), which is the *opposite* of their id order — so the store's
+  ordering is not what produced this.
+- **Tier labels and tier order intact** — the rows that vanish first when a frame overflows.
+- **No separator row** between the pending and done blocks in any tier (DoD 8).
+- **The 25h row is gone from the view** (DoD 3) and still in the database.
+- **Struck through**: 4 done rows, 4 SGR-9 runs. The escape is `[2;9m`/`[0;9m`, not `[9m` —
+  see the Decisions log; the bare-`[9m` grep in CLAUDE.md reported 0 and briefly looked like a
+  rendering bug.
+
+### DoD 11 — the CLI is untouched, asserted two ways
+
+```
+$ git status --short internal/cli/ internal/store/ internal/scope/
+(empty)
+
+$ git diff --stat internal/cli/testdata/
+(empty — list.json byte-identical)
+```
+
+And behaviourally, which is the assertion that would catch a leak the file check cannot:
+
+```
+$ tdo list --all --scope global
+3 [ ] global  pending newer
+2 [x] global  done recently      <- still interleaved, NOT moved to the end
+1 [ ] global  pending
+```
+
+The popup groups; the CLI does not. That is the whole reason `partitionDone` lives in
+`internal/tui` and not in the store's `ORDER BY`.
+
+### DoD 13 — sweep
+
+```
+$ make lint
+go vet ./...
+
+$ gofmt -l .
+(empty)
+
+$ make test
+?   	github.com/agusarias/tmux-todo/cmd/tdo	[no test files]
+ok  	github.com/agusarias/tmux-todo/internal/cli	1.251s
+ok  	github.com/agusarias/tmux-todo/internal/scope	1.202s
+ok  	github.com/agusarias/tmux-todo/internal/store	1.577s
+ok  	github.com/agusarias/tmux-todo/internal/task	0.926s
+ok  	github.com/agusarias/tmux-todo/internal/tui	9.371s
+
+$ make test-plugin
+plugin harness: 197 passed, 0 failed
+
+$ make build && otool -L bin/tdo
+bin/tdo:
+	/usr/lib/libSystem.B.dylib
+	/usr/lib/libresolv.9.dylib
+# no libsqlite3 — static build holds
+```
+
+### Mutation proofs
+
+Five, all run, all discriminating.
+
+| Mutation | Result |
+|---|---|
+| `anchorCursor` reduced to `clampCursor()` (the id anchor removed) | **3 tests fail**, including the DoD 7 round trip: `cursor is on "first" (id 1), want it to follow the completed row "second" (id 2)` |
+| `partitionDone` not wired into the merged view | `TestMergedViewPutsDoneAtTheEndOfItsTier` and `TestSpaceMovesTheRow...` fail |
+| `partitionDone` not wired into the all-tasks view | `TestAllTasksViewPutsDoneAtTheEndOfEachGroup` fails: `group rows = [added last, finished first / added first, finished last / still to do]` — done rows still above pending |
+| `completedAfter` neutered to `return false` (done block keeps store order) | 3 tests fail, incl. `partitionDone = [s-done-old s-done-new …], want [s-done-new s-done-old …]` |
+| `doneSince` restored to the `openedAt` max() | **6 tests fail**, incl. `rows = ["still to do"], want both the pending and the recently-done row` |
+
+The first one is the plan's required DoD 7 proof, and it also settles the plan's open question:
+`TestCursorReAnchorsOnTaskID` — which CLAUDE.md recorded as **vacuous**, since completing a row
+used not to reorder — now fails under that mutation. It has become a real guard because the
+behaviour around it changed. Both it and `TestCursorReAnchorsWhenRowsShift` stay.
+
+The fourth mutation is worth a note: the *first* attempt at it (`_ = completedAfter`) left the
+`sort` import unused, so nothing compiled and the run produced no failures at all — which reads
+exactly like "no test covers this". A mutation that does not build is not evidence; it was
+redone so it compiles.
+
+### DoD-by-DoD
+
+1. **`doneSince` is one line; `openedAt` is gone** — `grep -rn openedAt internal/` matches
+   only comments explaining the removal (7 hits, all prose); the struct field and every reader
+   are gone, which is why the four tests that set it had to be edited to compile. `TestDoneSinceIsTheRetentionWindow` asserts it both on a bare `Model` and after
+   `New`, so a doneSince that still consulted an open time would differ on the second leg.
+2. **Completed 3h ago by another session, visible and struck through** —
+   `TestDoneRowCompletedBeforeOpenIsVisible`. The row is completed *before* the model is built,
+   which is the case the old rule could not show. Strikethrough asserted on the style object
+   (`textStyle(...).GetStrikethrough()`), since a test process has no colour profile.
+3. **Both edges** — `TestDoneVisibilityEdges`: 0h, 3h, 23h59m visible; 24h01m, 25h hidden. Each
+   leg also asserts the row is still in the database.
+4. **Pending first, then done, per tier; tier order unchanged** —
+   `TestPartitionDoneGroupsDoneAtTheEndOfEachTier` (pure) and
+   `TestMergedViewPutsDoneAtTheEndOfItsTier` (through the model, asserting the session tier's
+   done row sits *above* the global tier's pending one, so done rows are not swept into one
+   block at the bottom). `TestPartitionDoneKeepsTierOrderAndMembership` adds that nothing is
+   dropped, duplicated or moved across a tier boundary.
+5. **`done_at` DESC** — the pure test uses timestamps that contradict the id order;
+   `TestPartitionDoneWithAnAllDoneTier` covers the tier where nothing moves but everything still
+   sorts; the all-tasks test completes rows in id-contradicting order. Mutation-proven.
+6. **Every all-tasks group** — `TestAllTasksViewPutsDoneAtTheEndOfEachGroup`, plus the capture
+   above. Applied inside `visibleGroups`, so a group *is* one scope and no tier detection is
+   needed there.
+7. **The row moves, the cursor follows, and the round trip restores it** —
+   `TestSpaceMovesTheRowToTheEndOfItsTierAndTheCursorFollows`: after `space` the row is last in
+   its tier, the pending rows above keep their order, the cursor index equals that last
+   position, the row is still in `View()`; after a second `space` the row is back at its
+   original index with its original id.
+8. **No separator row** — `TestNoSeparatorRowBetweenPendingAndDone` asserts
+   `len(m.rows) == len(m.tasks)` and that every merged-view row is a `rowTask`.
+9. **Frame invariant with a mostly-done list** — `TestFrameNeverExceedsThePane`'s fixture now
+   seeds **27 of 40 rows done**, stamped inside the window, with a frozen clock; it fatals if
+   fewer than 40 rows load, so the done rows cannot silently age out and leave the size sweep
+   proving nothing. Still asserted on the unclamped `frame()` with the `clampHeight` backstop
+   asserted *not* to have fired. 3 versions x 2 views x 9 sizes x 4 filters x 8 modes.
+10. **Row width** — `TestRowsNeverExceedTheirWidth` gained done rows (long and short) and now
+    sweeps every cursor position, so done-and-selected is covered.
+    `TestStrikethroughCostsNoColumns` is the new mechanism check: a done row and an identical
+    pending one must render to the same width, which is what would break if the marker ever
+    became a character instead of a style.
+11. **CLI untouched** — above, file-level and behavioural.
+12. **`design.md` amended** — the "Completion vs deletion" section now states the 24h-only rule
+    and the end-of-tier placement, with the **old sentence quoted verbatim** in a parenthetical
+    that also records why it changed. Nothing was silently overwritten.
+13. **Sweep** — above.
+
+### Not verified / limits
+
+- **Rows older than 24h still accumulate invisibly.** `store.PurgeDone` still has no caller,
+  exactly as before and as `design.md` records deliberately. Out of scope per the brief.
+- **The capture check is one size (80x20) and one seeding.** It is a real-frame smoke test, not
+  a sweep; the sweep is `TestFrameNeverExceedsThePane`, which is where the 9 sizes live.
+- **`done_at` ties are resolved by the store's order, not by anything this task chose.** Two
+  rows completed in the same second keep their newest-first sequence (the sort is stable). That
+  is deliberate and is why the tests stamp distinct timestamps rather than relying on it.

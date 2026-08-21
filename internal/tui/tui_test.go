@@ -699,9 +699,20 @@ func TestFrameNeverExceedsThePane(t *testing.T) {
 	db := openDB(t)
 	// Enough rows to fill any viewport under test, across all three tiers so
 	// the widest tier labels are in play too.
+	//
+	// Two thirds of them are DONE, and stamped inside the retention window, so
+	// every size below renders a list that is mostly struck-through rows sitting
+	// at the end of their tier. Before this task a done row was visible only in
+	// the popup session that completed it, so no frame was ever measured with
+	// them in it — and "more visible rows" is exactly the change that can walk
+	// into the chromeHeight arithmetic these assertions exist to guard.
+	frameClock := time.Unix(1_760_000_000, 0)
 	for i := 0; i < 40; i++ {
 		scope := []task.Scope{sessionScope, dirScope, globalScope}[i%3]
-		add(t, db, fmt.Sprintf("task %02d with a fairly typical amount of text", i), scope)
+		added := add(t, db, fmt.Sprintf("task %02d with a fairly typical amount of text", i), scope)
+		if i%3 != 0 {
+			stampDone(t, db, added.ID, frameClock.Add(-time.Duration(i)*time.Minute))
+		}
 	}
 	scopes := []task.Scope{sessionScope, dirScope, globalScope}
 
@@ -769,7 +780,18 @@ func TestFrameNeverExceedsThePane(t *testing.T) {
 								// Without this the "copied" modes press an inert
 								// key and assert nothing — the vacuous-guard trap.
 								Copy: func(string) error { return nil },
+								// Frozen inside the retention window, so the
+								// seeded done rows are actually on screen. With
+								// the real clock they age out and the mostly-done
+								// list this fixture builds would silently become
+								// a third of its size.
+								Now: frozen(frameClock),
 							})
+							if len(m.tasks) != 40 {
+								t.Fatalf("%d rows loaded, want all 40 (27 of them done) — "+
+									"the done rows aged out and this size proves nothing about them",
+									len(m.tasks))
+							}
 							sized, _ := m.Update(tea.WindowSizeMsg{Width: size.w, Height: size.h})
 							m = sized.(Model)
 							if view == "all" {
