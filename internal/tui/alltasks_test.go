@@ -330,14 +330,12 @@ func TestAllTasksSharesTheDoneVisibilityRule(t *testing.T) {
 	}
 	done := mustGet(t, db, old.ID)
 
-	// A popup opened long ago and now sitting past the retention window, so the
-	// row is outside it on arrival — exactly the case the merged view hides.
-	openedLongAgo := done.DoneAt.Add(-time.Hour)
+	// Past the retention window, so the row is outside it on arrival — exactly
+	// the case the merged view hides. No openedAt to arrange: since this task
+	// the clock is the only input.
 	cfg := allTasksConfig(db)
-	cfg.Now = frozen(openedLongAgo)
+	cfg.Now = frozen(done.DoneAt.Add(store.DoneRetention + time.Hour))
 	m := New(cfg)
-	m.openedAt = openedLongAgo
-	m.cfg.Now = frozen(done.DoneAt.Add(store.DoneRetention + time.Hour))
 
 	next, _ := m.Update(m.reloadCmd()())
 	m = next.(Model)

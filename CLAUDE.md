@@ -38,7 +38,8 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   `Update`/`View` are testable without tmux. Row formatting lives in `render.go`
   as pure functions.
 - `internal/tui` also holds the input row (`input.go`, `field.go`), the deferred
-  delete queue (`delete.go`) and the `y` copy (`copy.go`). All are pure model state; the
+  delete queue (`delete.go`), the `y` copy (`copy.go`) and the done-row placement
+  (`donerows.go`). All are pure model state; the
   only I/O any of them does is a store command, or the injected `Config.Copy`, returned
   from `Update`. `internal/cli/copy.go` is the other half of that seam: `tmux load-buffer`
   inside tmux, a hand-written OSC 52 escape outside it.
@@ -107,6 +108,22 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   Tea renders into the same tty from another goroutine, and a torn escape is garbage on
   screen rather than a failed copy. A terminal that ignores OSC 52 is indistinguishable from
   one that honoured it, so a nil error means "tdo wrote the sequence", nothing stronger.
+- **Done rows are re-ordered in `internal/tui`, never in the store's `ORDER BY`.** A completed
+  row within 24h sits at the end of its scope tier, `done_at` DESC, and that is a *layout*
+  decision — `tdo list` shares `listOrder`/`groupedOrder`, so sorting there would silently
+  reorder a published command's output as a side effect of a popup change.
+  `internal/tui/donerows.go`'s `partitionDone` is a pure function applied at the two points
+  rows are built (the `rowsMsg` handler and `visibleGroups`), and
+  `internal/cli/testdata/list.json` is the tripwire that says the CLI stayed put. Tiers are read
+  off the rows as runs of equal `Scope.Kind` rather than by walking `task.ScopeKinds()`: a tier
+  with no pending rows would otherwise merge into its neighbour.
+- **The 24h retention window was dead code for four tasks.** `doneSince()` returned the *later*
+  of "popup opened" and "now − 24h", and the open time is later for every popup not left
+  running for a day — so `store.DoneRetention` never bit and a row completed before you arrived
+  was already gone. Fixed 2026-08-21 by deleting the `openedAt` arm, which also required
+  *amending `docs/design.md`* (the old wording specified the behaviour being removed). A
+  constant that exists, is tested, and is unreachable in production is not caught by any test
+  that injects around it — the tests all froze the clock *and* set `openedAt`.
 - **`d` in the popup queues; the DELETE runs at close.** `u` un-hides rather than
   re-inserts, which is the only way the row comes back with its original id, timestamp and
   position (`store.Add` would assign new ones and move it to the top of its tier). The costs
@@ -178,6 +195,14 @@ shell picks it up, fix PATH rather than downgrading dependencies.
   covers what its name claims; a green test whose subject is gone is evidence of
   nothing. Both tests stayed in the tree, and the close-out records which one is the
   real guard.
+- **The vacuous cursor test became a real guard, because completing a row now reorders.**
+  CLAUDE.md recorded `TestCursorReAnchorsOnTaskID` as passing with the id-anchoring code
+  deleted, since completing a row did not move it and the index landed on the same task anyway.
+  Since the 24h task a completed row moves to the end of its tier, so that test now *fails*
+  when the anchor is removed (verified by mutation, alongside
+  `TestCursorReAnchorsWhenRowsShift`). Both remain; the point worth keeping is that "is this
+  test vacuous?" is a question about the *code around it*, and the answer changes when that
+  code does — a test can silently acquire or lose its teeth without being edited.
 - **A multi-statement `Exec` applies statements up to the first failure** and
   leaves them there — hence the transaction around each migration. That per-file
   unit is a `SAVEPOINT` *inside* the one outer `BEGIN IMMEDIATE`, so a failed
@@ -245,8 +270,14 @@ shell picks it up, fix PATH rather than downgrading dependencies.
 - **`capture-pane -pe` interleaves escapes *between words*.** A styled row comes back as
   `^[[2;9mrebase^[[0;9m ^[[2monto^[[0;9m ^[[2mmain^[[0m`, so grepping the capture for a
   multi-word phrase finds nothing even though the phrase is on screen. Grep for one word, or
-  for the escape itself (`[9m` is strikethrough). An empty grep here is a capture artifact,
-  not a missing row — it cost half an hour once.
+  for the escape itself. An empty grep here is a capture artifact, not a missing row — it cost
+  half an hour once.
+  **And SGR 9 never arrives alone, so `grep '\[9m'` answers zero for a row that IS struck
+  through.** A done row emits `^[[2;9m` / `^[[0;9m` — strikethrough combined with faint — so
+  the pattern that works is `;9m`. This note used to say "`[9m` is strikethrough", and that
+  spelling cost another half hour: the capture looked like proof that done rows rendered
+  unstyled, which would have been a real bug. Dump the distinct codes
+  (`grep -o $'\x1b\[[0-9;]*m' | sort -u`) before believing a style is absent.
 - **lipgloss styles render to plain text in tests** — a test process has no colour
   profile, so asserting on rendered ANSI passes whatever style was chosen. Assert
   on the style object instead (`textStyle(...).GetStrikethrough()`) and prove the

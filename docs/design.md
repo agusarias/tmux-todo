@@ -105,10 +105,24 @@ body, so it costs no chrome row, and it is where the version lives too.
 - `space` **toggles** completion: the row stays visible **struck-through** so the action is
   legible and reversible in the moment. Pressing `space` again undoes it, which is the only
   undo the product has until an undo stack lands.
-- Completed rows are **hidden from the view**, never deleted. A row you complete now stays
-  on screen for the rest of this popup; one that was already done when the popup opened, or
-  completed more than 24h ago, is hidden when you arrive. The row remains in the DB marked
-  done — history and stats stay possible later.
+- Completed rows are **hidden from the view**, never deleted. The rule is time since
+  completion and nothing else: a row completed **less than 24h ago is visible**, whenever you
+  arrive and whichever popup session completed it; one completed longer ago is hidden. The row
+  remains in the DB marked done — history and stats stay possible later.
+- A visible done row sits at the **end of its scope tier**, below that tier's pending rows,
+  ordered most-recently-completed first. Same inside every group of the all-tasks view. There
+  is no separator row between the two blocks: strikethrough and position are the signal, and
+  at the 60x15 floor the body has 13 rows to spend.
+
+  *(Amended 2026-08-21. The previous wording was: "A row you complete now stays on screen for
+  the rest of this popup; one that was already done when the popup opened, or completed more
+  than 24h ago, is hidden when you arrive." That made the 24h window unreachable — `doneSince`
+  took the later of "popup opened" and "now − 24h", and the open time is later for every popup
+  not left running for a day — so `store.DoneRetention` was in effect dead code and anything
+  completed before you arrived was already gone. Changed on the user's instruction: seeing
+  what got done today is the point, so 24h since completion is now the whole rule. Grouping
+  done rows at the end of their tier rather than leaving them inline is the other half of that
+  call — a day of completions inline pushes "what is left" off the top of a 13-row body.)*
 
   *(Earlier wording said rows were "purged from the view" **and** that they remain in the
   DB. The only store primitive for purging is a hard `DELETE`, so those two halves could not
