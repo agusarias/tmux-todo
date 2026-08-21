@@ -61,15 +61,15 @@ func (f *field) setWidth(w int) {
 //
 // The keys the caller intercepts first — enter, tab, esc — never reach here.
 func (f *field) handleKey(msg tea.KeyMsg) bool {
-	switch msg.Type {
-	case tea.KeyRunes, tea.KeySpace:
+	if isTextKey(msg) {
 		runes := msg.Runes
 		if msg.Type == tea.KeySpace {
 			runes = []rune{' '}
 		}
 		f.insert(runes)
 		return true
-
+	}
+	switch msg.Type {
 	case tea.KeyBackspace:
 		if f.pos > 0 {
 			f.runes = append(f.runes[:f.pos-1], f.runes[f.pos:]...)
@@ -185,4 +185,23 @@ func (f field) windowStart(cells []rune, pos int) int {
 		}
 	}
 	return 0
+}
+
+// isTextKey reports whether handleKey would treat msg as literal text to insert.
+//
+// It is a named predicate rather than an inline case list because a second caller
+// needs the same answer: the close-key check in updateInput must not fire for a
+// key the row would type. Two copies of "runes or space" would be two chances to
+// forget tea.KeySpace, and forgetting it means a @todo-key of Space quits the
+// popup instead of inserting a space.
+//
+// The Alt check is the non-obvious half. Bubble Tea reports alt+t as
+// KeyRunes{'t'} with Alt set, so a type-only test calls a chord "text" — which
+// both made alt+<rune> insert a bare letter into the input row and would have
+// stopped an alt close key working there. A modifier means it is not typing.
+func isTextKey(msg tea.KeyMsg) bool {
+	if msg.Alt {
+		return false
+	}
+	return msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace
 }

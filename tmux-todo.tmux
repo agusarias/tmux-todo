@@ -339,17 +339,40 @@ install_keybind() {
             ;;
     esac
 
+    # The popup is handed the key that opened it, so pressing it again closes it.
+    # An environment variable on the popup rather than a tmux query inside tdo:
+    # the popup's cold start is the product, and a second display-message would
+    # cost ~5ms of it on every open.
+    #
+    # Only for a root table. With a prefix table the opening chord is prefix+key,
+    # the prefix cannot reach a focused popup, and the bare key would be a
+    # *different* key from the one that opened it — which is not what "the same
+    # hotkey" means. Prefix installs get a byte-identical bind body to before.
+    #
+    # A key name containing a quote is dropped rather than embedded. This string
+    # is parsed by tmux on every server start and tmux's single-quoted strings
+    # have no escape character, so a quote would make the whole bind-key argument
+    # unparseable — the popup would stop opening for every install. No close key
+    # is a working popup; a broken keybind is not.
+    local popup_env=''
+    case $table:$key in
+        root:*\'*|root:*\"*)
+            warn "@todo-key '$key' contains a quote and cannot be passed to the popup; closing it with the same key is off (q and esc still work)."
+            ;;
+        root:*) popup_env="-e TDO_POPUP_KEY='$key' " ;;
+    esac
+
     tmux bind-key -T "$table" "$key" "if-shell -F '#{m:-*,#{e|-|:#{client_width},100}}' {
   if-shell -F '#{m:-*,#{e|-|:#{client_height},25}}' {
-    display-popup -E -w 60 -h 15 '$TDO_BIN tui'
+    display-popup -E ${popup_env}-w 60 -h 15 '$TDO_BIN tui'
   } {
-    display-popup -E -w 60 -h 60% '$TDO_BIN tui'
+    display-popup -E ${popup_env}-w 60 -h 60% '$TDO_BIN tui'
   }
 } {
   if-shell -F '#{m:-*,#{e|-|:#{client_height},25}}' {
-    display-popup -E -w 60% -h 15 '$TDO_BIN tui'
+    display-popup -E ${popup_env}-w 60% -h 15 '$TDO_BIN tui'
   } {
-    display-popup -E -w 60% -h 60% '$TDO_BIN tui'
+    display-popup -E ${popup_env}-w 60% -h 60% '$TDO_BIN tui'
   }
 }"
 }

@@ -408,12 +408,25 @@ tm() { "$REAL_TMUX" -L "$SOCK" "$@"; }
 # but on tmux 3.7b combining -T with a key argument prints NOTHING and exits 0 —
 # for a key that IS bound. An assertion of 0 built on it passes while the binding
 # sits right there, which is the wrong direction to be wrong in.
+# The awk unquotes field 4 first, because tmux re-quotes a key name when it
+# prints it and the spelling it picks depends on the key: `t` comes back bare,
+# `'` as `\'`, `M-'` as `"M-'"`, and `C-"` as `'C-"'`. A bare `$4 == k` therefore
+# answers "not bound" for a key that is sitting right there — the wrong direction
+# to be wrong in, since an assertion of zero passes. Bare keys are unaffected, so
+# this is a no-op for every case that predates the close-key section.
+KEY_AWK='
+function unq(s) {
+    sub(/^\\/, "", s)
+    if (s ~ /^".*"$/ || s ~ /^\047.*\047$/) s = substr(s, 2, length(s) - 2)
+    return s
+}
+unq($4) == k'
 plugin_keybinds_for() {
-    tm list-keys -T "${2:-prefix}" 2>/dev/null | awk -v k="$1" '$4 == k' | grep 'display-popup'
+    tm list-keys -T "${2:-prefix}" 2>/dev/null | awk -v k="$1" "$KEY_AWK" | grep 'display-popup'
 }
 count_plugin_keybinds_for() { plugin_keybinds_for "$1" "${2:-prefix}" | grep -c . ; }
 count_all_keybinds_for() {
-    tm list-keys -T "${2:-prefix}" 2>/dev/null | awk -v k="$1" '$4 == k' | grep -c .
+    tm list-keys -T "${2:-prefix}" 2>/dev/null | awk -v k="$1" "$KEY_AWK" | grep -c .
 }
 
 # tdo hooks, counted by BODY not name: after `set-hook -gu session-renamed`,
@@ -910,6 +923,315 @@ else
 fi
 case_end
 
+# ============================================== TDO_POPUP_KEY (close key)
+
+# The popup closes on the key that opened it, which needs @todo-key to reach the
+# program *inside* the popup. tmux cannot help: while a display-popup has focus
+# the outer client's binding never fires and there is no popup key table to bind
+# a closer in. So the plugin puts the key in the popup's environment with
+# `display-popup -e` and tdo acts on the second press.
+#
+# What these cases guard is the bind body, which tmux parses on every server
+# start. A malformed argument here does not degrade the feature — it stops the
+# popup opening for every existing install.
+
+# popup_env_count <key> <table> — how many of the plugin's four display-popup
+# branches carry TDO_POPUP_KEY. Four is "all of them"; zero is "none".
+# list-keys prints the whole brace block on one line, so this counts occurrences
+# within it rather than lines.
+popup_env_count() {
+    plugin_keybinds_for "$1" "${2:-prefix}" |
+        grep -o 'TDO_POPUP_KEY' | grep -c .
+}
+
+# The number of display-popup branches, so "every branch carries it" is asserted
+# against the real count rather than a literal 4 that silently drifts if a fifth
+# size branch is ever added.
+popup_branch_count() {
+    plugin_keybinds_for "$1" "${2:-prefix}" | grep -o 'display-popup' | grep -c .
+}
+
+# DoD 2, the root case: every branch carries the key, and it is the *configured*
+# key rather than a hardcoded one.
+case_start closekey-1-root-carries-the-key
+stub "$PATHDIR/tdo"
+tm set-option -g @todo-key-table root >/dev/null 2>&1
+tm set-option -g @todo-key C-l >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for C-l root)" "the root binding is installed"
+branches=$(popup_branch_count C-l root)
+assert_eq 4 "$branches" "four display-popup size branches, as before"
+assert_eq "$branches" "$(popup_env_count C-l root)" "every branch carries TDO_POPUP_KEY"
+# tmux re-quotes the bind body when printing it and drops quotes it does not
+# need, so the value comes back as TDO_POPUP_KEY=C-l rather than the
+# TDO_POPUP_KEY='C-l' the script wrote.
+assert_contains "$(plugin_keybinds_for C-l root)" "TDO_POPUP_KEY=C-l" "and it carries the configured key"
+case_end
+
+# ...and it follows @todo-key rather than being hardcoded. A different key must
+# produce a different environment value, which is what a hardcoded 'C-l' would
+# fail.
+case_start closekey-2-follows-the-option
+stub "$PATHDIR/tdo"
+tm set-option -g @todo-key-table root >/dev/null 2>&1
+tm set-option -g @todo-key M-w >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for M-w root)" "the root binding is installed on M-w"
+assert_contains "$(plugin_keybinds_for M-w root)" "TDO_POPUP_KEY=M-w" "TDO_POPUP_KEY follows @todo-key"
+assert_absent "$(plugin_keybinds_for M-w root)" "TDO_POPUP_KEY=C-l" "the key is not hardcoded"
+case_end
+
+# DoD 2, the prefix case: no TDO_POPUP_KEY at all. In a prefix table the opening
+# chord is prefix+key, the prefix cannot reach a focused popup, and a bare-key
+# closer would be a different key from the opener.
+case_start closekey-3-prefix-carries-nothing
+stub "$PATHDIR/tdo"
+tm set-option -g @todo-key t >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for t prefix)" "the prefix binding is installed"
+assert_eq 4 "$(popup_branch_count t prefix)" "four display-popup branches"
+assert_eq 0 "$(popup_env_count t prefix)" "and NONE of them carries TDO_POPUP_KEY"
+case_end
+
+# The default install is a prefix install, so the common case must also be clean.
+case_start closekey-4-default-install-carries-nothing
+stub "$PATHDIR/tdo"
+out=$(plugin_run)
+assert_eq 0 "$(popup_env_count t prefix)" "the default (prefix t) install passes no TDO_POPUP_KEY"
+case_end
+
+# An invalid @todo-key-table falls back to prefix, so it must also fall back to
+# no close key — the fallback has to carry the whole prefix decision, not half.
+case_start closekey-5-invalid-table-carries-nothing
+stub "$PATHDIR/tdo"
+tm set-option -g @todo-key-table nonsense >/dev/null 2>&1
+tm set-option -g @todo-key C-l >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for C-l prefix)" "falls back to a prefix binding"
+assert_eq 0 "$(popup_env_count C-l prefix)" "and passes no TDO_POPUP_KEY"
+case_end
+
+# DoD 3, and the one that protects every existing install: a key name containing
+# a quote. tmux's single-quoted strings have no escape character, so embedding it
+# in the bind body would make the whole bind-key argument unparseable and the
+# popup would stop opening. The key must still be bound, the popup must still
+# open, and no TDO_POPUP_KEY may be present.
+#
+# The key names here are ones tmux actually accepts. The first attempt used
+# "C-l'x", which tmux rejects with "unknown key" — but so does "C-lx", so the
+# quote had nothing to do with it and the case was testing an invalid key name
+# rather than a quoted one. `'`, `"`, `M-'` and `C-"` all bind for real.
+for spec in "apostrophe:'" 'quote:"' "alt-apostrophe:M-'" 'ctrl-quote:C-"'; do
+    label=${spec%%:*}
+    badkey=${spec#*:}
+    case_start "closekey-6-quote-in-key-$label"
+    stub "$PATHDIR/tdo"
+    tm set-option -g @todo-key-table root >/dev/null 2>&1
+    tm set-option -g @todo-key "$badkey" >/dev/null 2>&1
+    out=$(plugin_run)
+    # The warning is the user-facing half; the script's own stderr is asserted
+    # rather than the tmux message log, which older tmux cannot show.
+    assert_contains "$out" "cannot be passed to the popup" "the script says why the close key is off"
+    assert_eq 1 "$(count_plugin_keybinds_for "$badkey" root)" "the keybind is still installed"
+    assert_eq 4 "$(popup_branch_count "$badkey" root)" "all four popup branches survive"
+    assert_eq 0 "$(popup_env_count "$badkey" root)" "and carry no TDO_POPUP_KEY"
+    # The server must still be healthy: a broken bind-key argument would have
+    # made tmux reject the whole command, and a broken *config* would show up as
+    # a server that cannot answer.
+    assert_eq "ok" "$(tm display-message -p ok 2>/dev/null)" "the tmux server is still answering"
+    case_end
+done
+
+# The other half of DoD 3: a tmux server *started* with such a config comes up.
+# The cases above set the option on a running server; this one puts it in the
+# config file the server reads at startup, which is how a real user would hit it,
+# and the failure mode there is a server that never comes up at all.
+case_start closekey-7-server-starts-with-a-quoted-key
+stub "$PATHDIR/tdo"
+conf=$CASEDIR/tmux.conf
+printf "set-option -g @todo-key-table root\nset-option -g @todo-key \"'\"\n" >"$conf"
+sock2=$SOCK-startup
+SOCKETS+=("$sock2")
+if "$REAL_TMUX" -L "$sock2" -f "$conf" new-session -d -s startup >/dev/null 2>&1; then
+    ok "a server whose config sets a quoted @todo-key starts"
+    # ...and the plugin can then install into it. The shim points at $SOCK, so
+    # this leg drives the script with a shim pointing at the second server.
+    printf '#!/bin/sh\nexec %s -L %s "$@"\n' "$REAL_TMUX" "$sock2" >"$PATHDIR/tmux"
+    chmod +x "$PATHDIR/tmux"
+    out=$(plugin_run)
+    assert_contains "$out" "cannot be passed to the popup" "and the install warns about the key"
+    keys=$("$REAL_TMUX" -L "$sock2" list-keys -T root 2>/dev/null | awk -v k="'" "$KEY_AWK")
+    assert_eq 1 "$(printf '%s' "$keys" | grep -c 'display-popup')" "and still binds the popup to it"
+    assert_eq 0 "$(printf '%s' "$keys" | grep -o 'TDO_POPUP_KEY' | grep -c .)" "with no TDO_POPUP_KEY"
+else
+    bad "a server whose config sets a quoted @todo-key failed to start"
+fi
+"$REAL_TMUX" -L "$sock2" kill-server >/dev/null 2>&1
+case_end
+
+# nested_client — manufactures an attached client on this case's server and
+# echoes its name, or nothing.
+#
+# display-popup refuses to run with "no current client", and a detached `tmux -L`
+# server has none. One can be built: a pane whose own command is `tmux attach`
+# becomes a real 80x24 client for the session it attached to. $TMUX must be
+# cleared or tmux refuses to nest.
+#
+# The attach is the pane's INITIAL COMMAND rather than something sent with
+# send-keys, so there is no shell to wait for and no startup rc to race — the
+# outer pane exists only to host a client, and it never needs to type.
+nested_client() {
+    tm new-session -d -s inner >/dev/null 2>&1
+    tm new-session -d -s outer -x 80 -y 24 "TMUX= $REAL_TMUX -L $SOCK attach -t inner" >/dev/null 2>&1
+    local i name
+    for i in $(seq 40); do
+        name=$(tm list-clients -F '#{client_name}' 2>/dev/null | head -1)
+        [ -n "$name" ] && { printf '%s' "$name"; return 0; }
+        sleep 0.25
+    done
+    return 1
+}
+
+# The env var must actually reach the program. `display-popup -e` is the whole
+# mechanism, so it is worth one direct check independent of the plugin: run a
+# popup whose command records its own environment.
+case_start closekey-8-display-popup-e-reaches-the-program
+stub "$PATHDIR/tdo"
+probe=$CASEDIR/env-probe
+outfile=$CASEDIR/env-answer
+printf '#!/bin/sh\nprintf "%%s" "${TDO_POPUP_KEY-<unset>}" > "%s"\n' "$outfile" >"$probe"
+chmod +x "$probe"
+client=$(nested_client)
+if [ -z "$client" ]; then
+    bad "could not manufacture an attached client, so -e was not proven"
+else
+    tm display-popup -c "$client" -E -e "TDO_POPUP_KEY=C-l" -w 40 -h 5 "$probe" >/dev/null 2>&1
+    for _ in 1 2 3 4 5 6 7 8; do [ -s "$outfile" ] && break; sleep 0.25; done
+    assert_eq "C-l" "$(cat "$outfile" 2>/dev/null)" "display-popup -e reaches the program inside the popup"
+fi
+case_end
+
+# DoD 1, the whole chain: the real plugin installs the real bind, the real binary
+# runs in the popup, and the SAME chord opens it, closes it, and opens it again.
+# Nothing below this line is a stub — it is the only case that proves the plugin,
+# the translation and Update agree with each other.
+if [ -z "$TDO_BIN" ]; then
+    printf '\n== closekey-9 SKIPPED: no usable go toolchain to build tdo with.\n'
+    printf '   This is the only case that presses the key for real.\n'
+else
+case_start closekey-9-the-hotkey-toggles-the-popup \
+    XDG_DATA_HOME=$TMPROOT/closekey-9-the-hotkey-toggles-the-popup/xdg \
+    XDG_STATE_HOME=$TMPROOT/closekey-9-the-hotkey-toggles-the-popup/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+tm set-option -g @todo-key-table root >/dev/null 2>&1
+tm set-option -g @todo-key C-l >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for C-l root)" "the root C-l binding is installed"
+
+# A task with a distinctive text, so "the popup is on screen" is a grep for
+# something only the popup can be showing. Seeded outside tmux so the harness's
+# own session never enters the sandbox database.
+mkdir -p "$(dirname "$DB")"
+env -u TMUX "$TDO_BIN" add --db "$DB" --global 'ZZCANARYZZ' >/dev/null 2>&1
+
+client=$(nested_client)
+if [ -z "$client" ]; then
+    bad "could not manufacture an attached client, so the toggle is unproven"
+else
+    # popup_state polls the capture for the canary, so the assertions wait for the
+    # popup rather than sleeping a guessed interval. It answers as soon as the
+    # state it is waiting for arrives, and reports whatever it last saw.
+    popup_state() { # want  -> echoes yes|no
+        local i seen
+        for i in $(seq 40); do
+            if tm capture-pane -p -t outer 2>/dev/null | grep -q 'ZZCANARYZZ'; then
+                seen=yes
+            else
+                seen=no
+            fi
+            [ "$seen" = "$1" ] && break
+            sleep 0.25
+        done
+        printf '%s' "$seen"
+    }
+
+    assert_eq "no" "$(popup_state no)" "the popup is not on screen to begin with"
+
+    tm send-keys -t outer C-l >/dev/null 2>&1
+    assert_eq "yes" "$(popup_state yes)" "C-l opens the popup"
+    printf '    -- capture with the popup open:\n'
+    tm capture-pane -p -t outer 2>/dev/null | grep -n 'ZZCANARYZZ\|tdo' | head -3 | sed 's/^/       /'
+
+    # THE assertion: the same chord, now delivered to the program inside the
+    # popup rather than to the outer client, closes it.
+    tm send-keys -t outer C-l >/dev/null 2>&1
+    closed=$(popup_state no)
+    assert_eq "no" "$closed" "C-l again closes it"
+
+    # The reopen leg only means anything if the close happened. Guarded, because
+    # against a build with the wiring removed it otherwise reported a cheerful
+    # "ok" for a popup that had simply never closed — a reassuring pass sitting
+    # next to the real failure.
+    if [ "$closed" = "no" ]; then
+        tm send-keys -t outer C-l >/dev/null 2>&1
+        assert_eq "yes" "$(popup_state yes)" "and C-l reopens it, so the key toggles"
+    else
+        printf '    -- skipped the reopen check: it never closed, so it cannot reopen\n'
+    fi
+
+    # q must still close it, from whatever state we are in.
+    tm send-keys -t outer q >/dev/null 2>&1
+    assert_eq "no" "$(popup_state no)" "q still closes the popup too"
+fi
+case_end
+fi
+
+# The other side of DoD 8, end to end: a PREFIX install passes no TDO_POPUP_KEY,
+# so the bare key must not close the popup. Without this, "the toggle works" and
+# "every key closes the popup" look identical from closekey-9 alone.
+if [ -z "$TDO_BIN" ]; then
+    printf '\n== closekey-10 SKIPPED: no usable go toolchain.\n'
+else
+case_start closekey-10-prefix-install-does-not-toggle \
+    XDG_DATA_HOME=$TMPROOT/closekey-10-prefix-install-does-not-toggle/xdg \
+    XDG_STATE_HOME=$TMPROOT/closekey-10-prefix-install-does-not-toggle/state
+DB=$CASEDIR/xdg/tmux-todo/tasks.db
+cp "$TDO_BIN" "$PATHDIR/tdo"
+tm set-option -g @todo-key t >/dev/null 2>&1
+out=$(plugin_run)
+assert_eq 1 "$(count_plugin_keybinds_for t prefix)" "the prefix t binding is installed"
+mkdir -p "$(dirname "$DB")"
+env -u TMUX "$TDO_BIN" add --db "$DB" --global 'ZZCANARYZZ' >/dev/null 2>&1
+
+client=$(nested_client)
+if [ -z "$client" ]; then
+    bad "could not manufacture an attached client"
+else
+    popup_state() {
+        local i seen
+        for i in $(seq 40); do
+            if tm capture-pane -p -t outer 2>/dev/null | grep -q 'ZZCANARYZZ'; then seen=yes; else seen=no; fi
+            [ "$seen" = "$1" ] && break
+            sleep 0.25
+        done
+        printf '%s' "$seen"
+    }
+    # prefix + t opens it.
+    tm send-keys -t outer C-b >/dev/null 2>&1
+    tm send-keys -t outer t >/dev/null 2>&1
+    assert_eq "yes" "$(popup_state yes)" "prefix t opens the popup"
+    # A bare `t` inside it must NOT close it: with no TDO_POPUP_KEY there is no
+    # close key, and `t` is not one of q/esc/ctrl+c.
+    tm send-keys -t outer t >/dev/null 2>&1
+    sleep 1
+    assert_eq "yes" "$(popup_state yes)" "a bare t does not close it (no TDO_POPUP_KEY was passed)"
+    tm send-keys -t outer q >/dev/null 2>&1
+    assert_eq "no" "$(popup_state no)" "q closes it"
+fi
+case_end
+fi
+
 # ============================================================== rename hook
 
 # The section that exists because everything above it can pass while the shipped
@@ -974,33 +1296,26 @@ wait_scope() {
     printf '%s' "$got"
 }
 
-# seed_session_task <session> <text> — file a session-scoped task from INSIDE
-# that session's own INTERACTIVE shell, which is also how a user creates one.
+# seed_session_task <session> <text> — CREATE the session with the add as its
+# pane's initial command, so the task is filed through the production path with
+# no shell and no keystrokes involved. `exec sleep` keeps the session alive
+# afterwards; a pane whose command exits takes the session with it, and there
+# would be nothing left to rename.
 #
-# It has to be the interactive shell and not the pane's initial command: tmux
-# sets $TMUX_PANE only for the former, and $TMUX_PANE is what lets `tdo add
-# --session` resolve the right session without a client. A pane started as
-# `new-session -d -s alpha "tdo add --session x"` is in the same client-less
-# position as the hook and would seed the *wrong* session — which would make
-# these cases pass or fail for a reason that has nothing to do with the rename.
+# An earlier version drove an interactive shell with send-keys, on the belief that
+# tmux sets $TMUX_PANE only for a shell and not for a pane's initial command.
+# **That was wrong** — measured: a pane whose command is `sh -c 'printenv
+# TMUX_PANE'` prints `%1`. The probe that said otherwise ran `printenv TMUX
+# TMUX_PANE`, which reported only the first variable, so TMUX_PANE looked absent.
 #
-# The handshake is not decoration either. send-keys into a shell that has not yet
-# started reading gets buffered, so a first version of this polled for the task
-# and re-sent when it did not appear — and a slow shell rc made every one of the
-# queued commands eventually run, seeding four copies of the same task. Wait for
-# the shell to answer once; after that, one send is one command.
+# The send-keys version also flaked, which is what sent someone back to check: it
+# needed a readiness handshake (keystrokes sent before the shell reads them are
+# buffered, and polling-and-resending seeded four copies of one task), and then
+# the handshake itself timed out under load because the shell's rc files are
+# slow. The pane-command form has no shell to wait for and cannot race.
 seed_session_task() {
-    local i ready=$CASEDIR/ready-$1
-    rm -f "$ready"
-    tm send-keys -t "$1" "touch '$ready'" Enter
-    for i in $(seq 60); do
-        [ -e "$ready" ] && break
-        sleep 0.25
-    done
-    if [ ! -e "$ready" ]; then
-        return 1
-    fi
-    tm send-keys -t "$1" "$TDO_BIN add --session '$2'" Enter
+    local i
+    tm new-session -d -s "$1" "$TDO_BIN add --session '$2'; exec sleep 300" >/dev/null 2>&1
     for i in $(seq 60); do
         [ -n "$(scope_of "$DB" "$2")" ] && return 0
         sleep 0.25
@@ -1078,8 +1393,9 @@ assert_eq 1 "$(count_tdo_hooks)" "the plugin installed its hook"
 assert_contains "$(tm show-environment -g XDG_DATA_HOME)" "$CASEDIR/xdg" \
     "the SERVER's environment carries the sandbox XDG_DATA_HOME"
 
-tm new-session -d -s alpha >/dev/null 2>&1
-tm new-session -d -s bravo >/dev/null 2>&1
+# Seeded in this order so bravo is the most recently created session, which is
+# what makes it — and not alpha — the one a client-less child resolves to. The
+# precondition below asserts that rather than trusting it.
 if seed_session_task alpha 'alpha task' && seed_session_task bravo 'bravo task'; then
     ok "seeded a session task in alpha and in bravo"
 else
@@ -1168,8 +1484,6 @@ cp "$TDO_BIN" "$PATHDIR/tdo"
 plugin_run >/dev/null
 tm set-hook -gu session-renamed >/dev/null 2>&1
 tm set-hook -ga session-renamed "run-shell -b '$PATHDIR/tdo session-renamed; $PATHDIR/tdo session-renamed'" >/dev/null 2>&1
-tm new-session -d -s delta >/dev/null 2>&1
-tm new-session -d -s decoy >/dev/null 2>&1
 if seed_session_task delta 'delta task' && seed_session_task decoy 'decoy task'; then
     ok "seeded a session task in delta and in the decoy"
 else
