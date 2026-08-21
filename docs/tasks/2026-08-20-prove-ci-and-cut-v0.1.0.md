@@ -484,3 +484,59 @@ unreachable the fallback is the CI plugin job's approach (mask `go` out of the s
 on this machine and assert it is really absent), which loses "the sandbox is intrinsic" but keeps
 the real download, the real checksum and the real keybind.
 
+### Step 7 (DoD 7): install by download, proven — 12 passed, 0 failed
+
+Run on this machine with a **masked PATH**, since the container attempt could not get an image
+(see the caveat below). The sandbox PATH is built by symlinking every binary out of the system
+directories **by wildcard** and skipping only `go`, `gofmt` and `tdo` — a curated allow-list is
+how a missing tool makes a case pass for the wrong reason, which this harness has been bitten by
+before. `HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` all point into a throwaway root, so nothing
+touched the real database or preferences.
+
+```
+== the sandbox is real (asserted, not assumed)
+    ok   no go on PATH
+    ok   no tdo on PATH
+    ok   tmux is present (tmux 3.7b)
+    ok   curl is present, so step 3 can download
+    ok   a sha256 tool exists, so the checksum path really runs
+== TPM-style clone of the public repo
+    ok   cloned the public repo the way TPM would
+    ok   the fresh clone has no bin/tdo
+== a server start sources the plugin, with no toolchain available
+    ok   the plugin installed bin/tdo with no go on PATH (so: by download)
+    ok   prefix t is bound to display-popup, exactly once
+== the installed binary IS the published asset
+    version   : v0.1.0
+    asset     : tdo-darwin-arm64
+    published : 10800ddf87d9bb89f149683af28e60cb55fa6205eac560b3aa2569c4e0540403
+    computed  : 10800ddf87d9bb89f149683af28e60cb55fa6205eac560b3aa2569c4e0540403
+    ok   byte-for-byte the release asset, not a local build
+== the binary works against a sandboxed database
+    ok   add and list work
+    tdo      v0.1.0   runtime go1.25.0 darwin/arm64   schema 2 (latest 2)   journal wal   ok
+== prefix t opens the popup, with a manufactured client
+    ok   prefix t opened the popup and the task is on screen
+    -- 8:  ││  ▸ ◉ ZZSTEP7ZZ installed by download         (global)  ││
+----------------------------------------
+step 7 (masked PATH): 12 passed, 0 failed
+```
+
+**What this proves that nothing before it did.** The plugin's step-3 download had only ever run
+against a local fixture server; here it fetched from the real
+`/releases/latest/download/`, past GitHub's redirect, and the file it installed hashes to the
+**published** `checksums.txt` entry — so the download, the redirect, the asset name the plugin
+computes from `uname`, the checksum verification and the keybind are all proven against a genuine
+release. The five assertions at the top are what keep the run from being vacuous: with `go` on
+the PATH the install could have come from a source build and every later assertion would still
+have passed.
+
+**Caveat, and it is the one the Verification section asked to avoid.** The brief's DoD says "a
+machine (or container)", which this satisfies; its Verification section preferred a container so
+that "no `go` on `PATH`" is *intrinsic* rather than arranged. Docker is installed and its daemon
+is up here, but no image could be pulled — `debian:stable-slim` from Docker Hub produced no layer
+in ~13 minutes and a `public.ecr.aws` mirror fared no better, so registry egress looks blocked in
+this environment. A masked PATH cannot prove the absence of things nobody thought to mask: a
+container would also have shown whether the install needs anything beyond tmux, curl and git.
+That leg is unrun, and the run above is what stands in its place.
+
