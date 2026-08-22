@@ -1,23 +1,30 @@
 # tmux-todo (`tdo`)
 
+[![CI](https://github.com/agusarias/tdo/actions/workflows/ci.yml/badge.svg)](https://github.com/agusarias/tdo/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/agusarias/tdo?sort=semver)](https://github.com/agusarias/tdo/releases/latest)
+[![Go Report Card](https://goreportcard.com/badge/github.com/agusarias/tmux-todo)](https://goreportcard.com/report/github.com/agusarias/tmux-todo)
+
 A tmux-native TODO manager with sesh-style ergonomics: a keybind opens a popup
 where you create, complete, delete and re-scope tasks. Tasks carry one of three
 independent scopes — `session`, `dir` or `global` — so returning to a session or
 a project brings back its pending action items.
 
-```
-  tdo
+![tdo popup: adding, completing and filtering tasks, then the all-tasks view](docs/img/demo.gif)
 
-  ▸ ⌘ check CI                 (session: work)
-    ⌘ rebase onto main
-    · fix auth redirect        (dir: ~/workspace/todo)
-    ◉ call the dentist         (global)
+The popup stays open across actions — toggle a few tasks, add two more, filter
+down to one scope, jump to the all-tasks view — all without reopening it. It's
+a real recording of `tdo tui` running in a tmux pane, not a mockup.
 
-  1/2/3 filter · j/k move · space done · q quit
-```
-
-The popup stays open across actions — toggle a few tasks, add two more, delete
-one, all without reopening it.
+- **Three independent scopes.** `session` follows a tmux session by name, `dir`
+  follows a git repo (worktrees fold into their parent), `global` is everywhere.
+- **The popup never closes on you.** Add, complete, edit, re-scope and delete in
+  one sitting; `u` undoes a delete until you quit.
+- **Everything's scriptable.** `tdo add`/`list`/`done`/`rm`/`count` work outside
+  the popup too, and `list --json` is a stable, versioned contract.
+- **One static binary, one SQLite file.** Pure-Go `modernc.org/sqlite` —
+  `CGO_ENABLED=0`, no libsqlite3, nothing else to install.
+- **Cold start is the product.** ~8ms process start; the popup opens about as
+  fast as you can let go of the key.
 
 ## Install
 
@@ -75,7 +82,8 @@ Nothing here can fail your tmux server start.
 Set `TDO_RELEASE_BASE_URL` in the environment tmux starts in to fetch from a
 mirror instead.
 
-### Without TPM
+<details>
+<summary><h3>Without TPM</h3></summary>
 
 #### From a release binary
 
@@ -119,6 +127,8 @@ keybind and the same rename hook. If you would rather not run the script at all,
 it is short and readable — copy the `bind-key` and `set-hook` lines out of it and
 substitute your own path.
 
+</details>
+
 ## Configuration
 
 | Option | Default | Meaning |
@@ -156,6 +166,11 @@ so a user-settable size would silently break the frame.
 
 Deletes are queued and only written when the popup closes, which is what lets
 `u` bring a row back with its original id, timestamp and position.
+
+The all-tasks view (`g`) groups every task by scope, marks which sessions are
+still running, and lets `Enter` jump you to one:
+
+![all-tasks view: grouped by session, dir and global, with a live-session marker](docs/img/all-view.png)
 
 ## From the command line
 
