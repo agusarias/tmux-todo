@@ -88,7 +88,7 @@ func (m Model) visibleGroups(groups []store.Group) []store.Group {
 		// Per group rather than over the concatenation: a group *is* one scope,
 		// so partitioning inside it needs no tier detection, and the two views
 		// cannot end up disagreeing about where a done row goes.
-		tasks := partitionDone(m.dropQueued(g.Tasks))
+		tasks := partitionDone(m.dropQueued(g.Tasks), m.belowRule())
 		if len(tasks) == 0 {
 			continue
 		}

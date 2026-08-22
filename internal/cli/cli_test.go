@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agusarias/tmux-todo/internal/config"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/task"
 	"github.com/agusarias/tmux-todo/internal/tui"
@@ -218,5 +219,76 @@ func TestTUIReportsAnUnopenableDatabase(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "tdo:") {
 		t.Errorf("stderr does not name the failure: %q", stderr)
+	}
+}
+
+// TestDoctorReportsTheConfig — DoD 3. A setting that falls back silently is the
+// failure this repo keeps shipping, so doctor is where a typo becomes visible.
+//
+// The seeded file mixes two good lines with two bad ones, because the useful
+// property is that doctor reports *both* halves: the effective values (which are
+// what the popup will actually do) and the lines that did not survive (which are
+// what the user thought they were setting).
+func TestDoctorReportsTheConfig(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	dir := filepath.Join(configHome, config.AppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	body := "complete-to-bottom always\nfollow-on-complet true\nfollow-on-uncomplete maybe\n"
+	configPath := filepath.Join(dir, config.FileName)
+	if err := os.WriteFile(configPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	code, stdout, stderr := run(t, "doctor", "--db", path)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0 (stderr: %s)", code, stderr)
+	}
+
+	wants := []string{
+		configPath,
+		// The one good line took effect...
+		"complete-to-bottom   always",
+		// ...and the two bad ones fell back to their defaults...
+		"follow-on-complete   false",
+		"follow-on-uncomplete true",
+		// ...while still being named, with their line numbers.
+		"line 2: unknown setting: follow-on-complet true",
+		"line 3: want true or false: follow-on-uncomplete maybe",
+	}
+	for _, want := range wants {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("doctor output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+// TestDoctorReportsTheConfigPathWithNoFile — the first question about a setting
+// that is not working is which file the binary is even looking at, so the path is
+// printed whether or not one exists, and a machine without one reports no
+// problems rather than an error.
+func TestDoctorReportsTheConfigPathWithNoFile(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	code, stdout, stderr := run(t, "doctor", "--db", path)
+	if code != 0 {
+		t.Fatalf("exit code %d, want 0 (stderr: %s)", code, stderr)
+	}
+	if want := filepath.Join(configHome, config.AppDir, config.FileName); !strings.Contains(stdout, want) {
+		t.Errorf("doctor did not print the config path %q:\n%s", want, stdout)
+	}
+	// The shipped defaults, which is what a machine with no config file runs.
+	for _, want := range []string{"complete-to-bottom   on-start", "follow-on-complete   false", "follow-on-uncomplete true"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("doctor output missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "         ! ") {
+		t.Errorf("doctor reported a problem with no config file present:\n%s", stdout)
 	}
 }

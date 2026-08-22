@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/agusarias/tmux-todo/internal/config"
 	"github.com/agusarias/tmux-todo/internal/scope"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/task"
@@ -56,6 +57,10 @@ type wiringFixture struct {
 	// both the zero value of the field and what a *missing* preference reads
 	// as — an assertion against false would pass with the wiring deleted.
 	stickyView bool
+	// noConfigFile suppresses the seeded config file, so a fixture can assert
+	// what a machine with no config gets. The zero value seeds one, because the
+	// interesting assertion is that a *non-default* file reaches the popup.
+	noConfigFile bool
 	// popupKey is the raw @todo-key the plugin would have put in the popup's
 	// environment, or "" for "no TDO_POPUP_KEY at all".
 	//
@@ -115,6 +120,28 @@ func (f *wiringFixture) install(t *testing.T) *wiringFixture {
 		unsetenv(t, popupKeyEnv)
 	} else {
 		t.Setenv(popupKeyEnv, f.popupKey)
+	}
+
+	// The config file. XDG_CONFIG_HOME is redirected whether or not one is
+	// seeded, so no leg of this test can read the developer's own config — which
+	// would make the assertions below depend on the machine they run on.
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if !f.noConfigFile {
+		dir := filepath.Join(configHome, config.AppDir)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir config dir: %v", err)
+		}
+		// Every value differs from config.Defaults(), so an assertion cannot
+		// pass against a runTUI that ignored the file and hard-coded the
+		// defaults. Two of the three also differ from the *zero* Prefs, which is
+		// what a deleted wiring would leave — follow-on-uncomplete cannot, since
+		// false is its zero value, and that is why it is not carrying this test
+		// on its own.
+		body := "follow-on-complete true\nfollow-on-uncomplete false\ncomplete-to-bottom never\n"
+		if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte(body), 0o644); err != nil {
+			t.Fatalf("seed config file: %v", err)
+		}
 	}
 
 	if f.sticky != "" {
@@ -360,6 +387,24 @@ var wiringChecks = map[string]wiringCheck{
 	// precisely because `false` is the zero value AND what an unreadable file
 	// degrades to, so an assertion against false would pass with the wiring line
 	// deleted — the same vacuous-environment trap CloseKey documents for $TMUX.
+	// Prefs must come from the seeded file, not from config.Defaults() and not
+	// from the zero value. The fixture writes a config in which all three
+	// settings differ from the defaults, so this fails against a runTUI that
+	// forgot to call config.Load as well as one that never read the file.
+	"Prefs": func(t *testing.T, _ string, cfg tui.Config, f *wiringFixture) {
+		if !cfg.Prefs.FollowOnComplete {
+			t.Error("Prefs.FollowOnComplete = false with `follow-on-complete true` in the" +
+				" config file — the file is not reaching the popup")
+		}
+		if cfg.Prefs.FollowOnUncomplete {
+			t.Error("Prefs.FollowOnUncomplete = true with `follow-on-uncomplete false` in the config file")
+		}
+		if cfg.Prefs.CompleteToBottom != config.Never {
+			t.Errorf("Prefs.CompleteToBottom = %q with `complete-to-bottom never` in the"+
+				" config file, want %q", cfg.Prefs.CompleteToBottom, config.Never)
+		}
+	},
+
 	"AllTasks": func(t *testing.T, _ string, cfg tui.Config, f *wiringFixture) {
 		if !f.stickyView {
 			t.Fatal("the fixture seeds no view preference, so this assertion could not fail")
@@ -652,5 +697,48 @@ func TestTUIConfigWiringWithACorruptStoredView(t *testing.T) {
 
 	if cfg.AllTasks {
 		t.Error("AllTasks = true for a corrupt preference file, want the merged list")
+	}
+}
+
+// TestTUIConfigWiringWithNoConfigFile is the other direction of the Prefs check
+// in wiringChecks: that one proves a file reaches the popup, this one proves a
+// machine without one gets the shipped defaults rather than a zero Prefs.
+//
+// The distinction is not academic. A zero Prefs has CompleteToBottom "", which
+// belowRule reads as "nothing sinks" — so the bug this catches is every done row
+// staying inline forever on any machine with no config file, with the whole
+// suite green because every other test injects Prefs by hand.
+func TestTUIConfigWiringWithNoConfigFile(t *testing.T) {
+	f := (&wiringFixture{session: "work", live: []string{"work"}, noConfigFile: true}).install(t)
+
+	cfg := runTUIAndCaptureConfig(t, f)
+
+	if cfg.Prefs != config.Defaults() {
+		t.Errorf("Prefs = %+v with no config file, want the shipped defaults %+v",
+			cfg.Prefs, config.Defaults())
+	}
+}
+
+// TestTUIConfigWiringWithAnUnparseableConfig — a config file full of junk must
+// leave the popup on the defaults and must not stop it opening. Asserted through
+// the real wiring rather than only in the config package's own test, because
+// "internal/cli decided to fail on a Problem" is exactly the kind of thing a unit
+// test over Parse cannot see.
+func TestTUIConfigWiringWithAnUnparseableConfig(t *testing.T) {
+	f := (&wiringFixture{session: "work", live: []string{"work"}, noConfigFile: true}).install(t)
+	dir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), config.AppDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	body := "\x00garbage\ncomplete-to-bottom sideways\nfollow-on-complete perhaps\n"
+	if err := os.WriteFile(filepath.Join(dir, config.FileName), []byte(body), 0o644); err != nil {
+		t.Fatalf("seed a corrupt config: %v", err)
+	}
+
+	cfg := runTUIAndCaptureConfig(t, f)
+
+	if cfg.Prefs != config.Defaults() {
+		t.Errorf("Prefs = %+v from a corrupt config, want the shipped defaults %+v",
+			cfg.Prefs, config.Defaults())
 	}
 }

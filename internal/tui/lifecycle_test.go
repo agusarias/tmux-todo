@@ -76,12 +76,16 @@ func TestSpaceTogglesBothDirections(t *testing.T) {
 // back at its original index with its original id. A re-insert could not do that
 // (store.Add would mint a new id and put it on top), so this also pins that the
 // toggle stays a toggle.
+// It pins one *configuration* rather than the only behaviour, since 2026-08-22:
+// complete-to-bottom `always` with follow-on-complete on, which is what this
+// popup did before either was a setting. The default now leaves a row completed
+// this session where it is — see cursorfollow_test.go.
 func TestSpaceMovesTheRowToTheEndOfItsTierAndTheCursorFollows(t *testing.T) {
 	db := openDB(t)
 	for _, text := range []string{"first", "second", "third"} {
 		add(t, db, text, globalScope)
 	}
-	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}})
+	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Prefs: alwaysPrefs(true, true)})
 
 	// Newest-first, so the list is [third second first] and j lands on "second".
 	m = pressAndSettle(t, m, "j")
@@ -143,12 +147,21 @@ func TestSpaceMovesTheRowToTheEndOfItsTierAndTheCursorFollows(t *testing.T) {
 // TestCursorReAnchorsOnTaskID — DoD 6. Re-anchoring by index would drift onto a
 // neighbour whenever the visible row set changes, which makes pressing space
 // twice on one row impossible.
+//
+// Its teeth have now changed twice, which is the whole lesson of this file.
+// Written vacuous (completing a row did not reorder, so the index landed on the
+// same task anyway); made real by the 24h task, when a completed row started
+// moving; and made vacuous again on 2026-08-22 by the default placement, under
+// which a row completed this session does not move. It is therefore pinned to
+// complete-to-bottom `always` with follow-on-complete on — the configuration in
+// which "the cursor is anchored to an id" is a claim that can be false. Anyone
+// dropping that Prefs is deleting the test without removing it.
 func TestCursorReAnchorsOnTaskID(t *testing.T) {
 	db := openDB(t)
 	for _, text := range []string{"first", "second", "third"} {
 		add(t, db, text, globalScope)
 	}
-	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}})
+	m := newLoaded(t, Config{DB: db, Scopes: []task.Scope{globalScope}, Prefs: alwaysPrefs(true, true)})
 	m = pressAndSettle(t, m, "j")
 	target := m.tasks[m.cursor]
 
