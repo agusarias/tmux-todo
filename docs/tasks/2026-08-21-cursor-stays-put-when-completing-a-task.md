@@ -236,8 +236,8 @@ the normal case, not a fault.
 
 ## Evidence
 
-Branch `cursor-and-placement-config` off `main`. No worktree: clean tree, nothing
-else in flight.
+Branch `cursor-and-placement-config` off `main`, merged as **17023f4b6dc2**
+(`git show 17023f4b6dc2`). No worktree: clean tree, nothing else in flight.
 
 ### The reported bug, on screen
 
