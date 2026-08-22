@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/agusarias/tmux-todo/internal/config"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/task"
 )
@@ -160,6 +161,17 @@ type Config struct {
 	// job is not to trade the user's exit for a preference file. Nil is fine and
 	// means "do not remember".
 	SetAllTasks func(bool) error
+	// Prefs is the user's configuration file, already parsed. It arrives as
+	// values for the same reason DefaultScope and AllTasks do: this package must
+	// not know where the file lives, or that there is a file.
+	//
+	// The zero value is deliberately NOT the shipped defaults — a zero Placement
+	// is not one of the three, and belowRule treats it as "nothing sinks". Every
+	// production path goes through internal/cli, which calls config.Load and gets
+	// config.Defaults() back for a machine with no file; a test that wants the
+	// real defaults asks config.Defaults() for them too, rather than relying on
+	// the zero value to mean something.
+	Prefs config.Prefs
 }
 
 // closesOn reports whether msg is the configured close key.
@@ -262,6 +274,16 @@ type Model struct {
 	// whole group's, so one `u` undoes exactly one action either way. Flattening
 	// this into a single []int64 is what made group delete need three undos.
 	queued [][]int64
+	// openedAt is when this popup was built, and it is a LAYOUT input: it is the
+	// boundary config.OnStart uses to tell "already done when I arrived" from
+	// "I just did this". See belowRule.
+	//
+	// It is not a visibility input and must not become one again. An openedAt
+	// clause in doneSince() is exactly the bug the 24h task removed — it is later
+	// than now-24h for every popup not left open for a day, so it always won and
+	// store.DoneRetention was dead code for four tasks. What the popup *shows*
+	// depends only on the clock; only where a shown row sits depends on this.
+	openedAt time.Time
 	// commitErr is what the queued deletes did on the way out. Update stores it
 	// and Run returns it: a delete that failed must not be reported as done.
 	commitErr error
@@ -311,11 +333,12 @@ type rowsMsg struct {
 // is issued by Init.
 func New(cfg Config) Model {
 	m := Model{
-		cfg:    cfg,
-		mode:   modeNormal,
-		view:   viewMerged,
-		width:  defaultWidth,
-		height: defaultHeight,
+		cfg:      cfg,
+		mode:     modeNormal,
+		view:     viewMerged,
+		width:    defaultWidth,
+		height:   defaultHeight,
+		openedAt: cfg.now(),
 	}
 	// Before Init(), never after: Init issues the first query, and the two views
 	// query different things (List vs ListGrouped). Setting the view afterwards
@@ -458,7 +481,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// caller remembers. m.tasks is documented as screen order, and
 			// rebuildRows flattens it directly — so the re-order has to
 			// happen before that, not after.
-			m.tasks = partitionDone(m.dropQueued(msg.tasks))
+			m.tasks = partitionDone(m.dropQueued(msg.tasks), m.belowRule())
 			m.groups = nil
 		}
 		m.err = msg.err
@@ -645,14 +668,43 @@ func (m Model) hasTask(id int64) bool {
 //
 // It is a toggle rather than a one-way action because it is the only undo the
 // product has — docs/design.md defers an undo stack — so a mis-press has to be
-// fixable by pressing the same key again.
+// fixable by pressing the same key again. That undo survives the cursor settings
+// below under the default config, where a completed row does not move and the
+// cursor is therefore still on it; under complete-to-bottom `always` with
+// follow-on-complete off, the second press lands on a different row and the way
+// back is to step down to the completed one.
+//
+// Where the cursor ends up is the user's setting, and it is asked separately for
+// the two directions because they mean opposite things: completing is "done with
+// this, show me the next one" (so by default the cursor holds its screen position
+// and the row that slides up is selected), uncompleting is "I want this back" (so
+// by default the cursor goes with it).
 func (m Model) toggleDone() (tea.Model, tea.Cmd) {
 	target, ok := m.selectedTask()
 	if !ok || m.cfg.DB == nil {
 		return m, nil
 	}
 
-	return m, m.writeThenReload(target.ID, func(ctx context.Context, db *store.DB) error {
+	// target.Done is the state *before* the toggle, so it names the action: a
+	// done row is about to be uncompleted.
+	follow := m.cfg.Prefs.FollowOnComplete
+	if target.Done {
+		follow = m.cfg.Prefs.FollowOnUncomplete
+	}
+	// Anchor 0 is not a special case invented here — it is what every unanchored
+	// reload already passes, and the rowsMsg handler reads it as "leave the cursor
+	// index alone, then clamp". Holding the index rather than an id is what makes
+	// the cursor stay put while the row moves out from under it. The cost is
+	// stated rather than hidden: another pane inserting a row in the window
+	// between the write and the re-read shifts every index, and this lands one row
+	// off where an id would not. That window is one store round-trip, and the
+	// general reload path is still id-anchored — see TestCursorReAnchorsWhenRowsShift.
+	anchor := int64(0)
+	if follow {
+		anchor = target.ID
+	}
+
+	return m, m.writeThenReload(anchor, func(ctx context.Context, db *store.DB) error {
 		if target.Done {
 			return db.Uncomplete(ctx, target.ID)
 		}
@@ -672,6 +724,42 @@ func (m *Model) anchorCursor(id int64) {
 		}
 	}
 	m.clampCursor()
+}
+
+// belowRule turns the user's config.Placement into the question partitionDone
+// asks of each row: does this one belong in its tier's bottom block?
+//
+// The three rules differ only in which done rows they claim, and every one of
+// them starts at Done — a pending row must never sink, whatever the setting.
+//
+// config.OnStart compares against openedAt rather than the clock, so the answer
+// for a given row does not change while the popup is open: a row you complete now
+// keeps its place for as long as you are looking at it, and is grouped below the
+// next time you arrive. Timestamps are unix seconds, so the comparison is
+// strictly-before: a row completed in the same second the popup opened stays
+// inline, which is right for your own keypress and harmless for anyone else's.
+//
+// A done row with no done_at cannot be shown to belong to this session, so
+// OnStart sinks it. Nothing in the current code path produces one — store.Complete
+// always stamps it — but the field is a pointer and completedAfter already refuses
+// to dereference it, so this refuses too.
+//
+// An unrecognised placement, including the zero value, means nothing sinks. That
+// is config.Never's behaviour and is the honest reading of "no setting reached
+// here": the list is then exactly the store's order, which is the one arrangement
+// this package cannot get wrong.
+func (m Model) belowRule() belowRule {
+	switch m.cfg.Prefs.CompleteToBottom {
+	case config.Always:
+		return func(t task.Task) bool { return t.Done }
+	case config.OnStart:
+		openedAt := m.openedAt
+		return func(t task.Task) bool {
+			return t.Done && (t.DoneAt == nil || t.DoneAt.Before(openedAt))
+		}
+	default:
+		return nil
+	}
 }
 
 // toggleFilter switches to a single-tier view, or back to the merged view when

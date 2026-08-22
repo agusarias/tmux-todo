@@ -104,15 +104,31 @@ body, so it costs no chrome row, and it is where the version lives too.
 
 - `space` **toggles** completion: the row stays visible **struck-through** so the action is
   legible and reversible in the moment. Pressing `space` again undoes it, which is the only
-  undo the product has until an undo stack lands.
+  undo the product has until an undo stack lands. That second press finds the same row under
+  the cursor in the default configuration, where a row completed this session does not move;
+  under `complete-to-bottom always` with `follow-on-complete off` it does not, and the way
+  back is to step down to the completed row.
 - Completed rows are **hidden from the view**, never deleted. The rule is time since
   completion and nothing else: a row completed **less than 24h ago is visible**, whenever you
   arrive and whichever popup session completed it; one completed longer ago is hidden. The row
   remains in the DB marked done — history and stats stay possible later.
-- A visible done row sits at the **end of its scope tier**, below that tier's pending rows,
+- A done row grouped at the **end of its scope tier** sits below that tier's pending rows,
   ordered most-recently-completed first. Same inside every group of the all-tasks view. There
   is no separator row between the two blocks: strikethrough and position are the signal, and
   at the 60x15 floor the body has 13 rows to spend.
+- **Which** done rows are grouped there is `complete-to-bottom` (see Configuration). By
+  default only those already done when the popup opened: a row you complete now keeps its
+  place for as long as you are looking at the list, and has moved below by the next time you
+  open it. The list therefore holds still while you work through it — which is the point,
+  because the cursor holds its position with it and the next row is where you left it.
+
+  *(Amended 2026-08-22, on the user's instruction. The previous wording was: "A visible done
+  row sits at the **end of its scope tier**, below that tier's pending rows, ordered
+  most-recently-completed first." — i.e. unconditionally, which is now `complete-to-bottom
+  always` and no longer the default. The motivating report: completing a row dragged the
+  cursor to the bottom of the tier with it, so clearing three tasks meant navigating back up
+  twice. That was the placement rule above meeting the id-anchored cursor, and neither of the
+  two tasks that introduced them considered the pair.)*
 
   *(Amended 2026-08-21. The previous wording was: "A row you complete now stays on screen for
   the rest of this popup; one that was already done when the popup opened, or completed more
@@ -199,6 +215,33 @@ instead, because a name's tail is what identifies it.
   keypress inside the popup would put ~5ms and a failure mode on the hot path. The staleness
   is cheap: a session killed while the popup is open still reads `(live)`, and `Enter` then
   falls through to the create-and-switch path anyway, so a wrong label costs nothing.
+
+## Configuration
+
+A handful of settings are taste rather than correctness, and live in a file the user writes:
+`$XDG_CONFIG_HOME/tmux-todo/config`, falling back to `~/.config/tmux-todo/config`. The
+*config* dir, not the state dir the sticky preferences use — those are written by the popup
+and record what you last did; this one is written by you and records what you want.
+
+One setting per line, `key value` (an `=` is accepted), `#` starts a comment. Booleans are
+`true` or `false`.
+
+| Setting | Values | Default | Meaning |
+|---|---|---|---|
+| `complete-to-bottom` | `always` · `never` · `on-start` | `on-start` | Which done rows are grouped at the end of their tier. `on-start`: only those already done when the popup opened. |
+| `follow-on-complete` | `true` · `false` | `false` | Whether the cursor follows a row it just completed, rather than holding its screen position. |
+| `follow-on-uncomplete` | `true` · `false` | `true` | The same question for uncompleting. |
+
+The two `follow-*` defaults differ on purpose: completing is "done with this, show me the
+next one", so the cursor holds its place and the row that slides up is selected;
+uncompleting is "I want this back", so the cursor goes with it. Note `follow-on-complete` is
+unobservable under the default placement — a row that does not move cannot be followed.
+
+**A config file is never a reason the popup does not open.** An unreadable file, an unknown
+setting, a malformed line or a bad value leaves that one setting at its default and the
+popup opens normally. Because that failure is otherwise silent — the classic "I set it and
+nothing happened" — `tdo doctor` prints the config path, the three effective values, and
+every line it could not use, with line numbers.
 
 ## CLI surface
 
@@ -363,7 +406,8 @@ needs; `go.mod` declares exactly that so the plugin can build for as many people
 ## v1 cut line
 
 **In:** three scopes · merged popup · add/edit/complete/delete/re-scope · all-tasks view
-with sesh jump · rename hook · full CLI with `--json` · TPM plugin.
+with sesh jump · rename hook · full CLI with `--json` · TPM plugin · a config file for
+cursor and done-row placement.
 
 **Deferred:** fuzzy search/filter over task text · tmux statusline pending count · undo
 stack · a done/history view · priorities, tags, due dates · multi-machine sync.

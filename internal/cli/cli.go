@@ -11,6 +11,7 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/agusarias/tmux-todo/internal/config"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/tui"
 )
@@ -181,6 +182,11 @@ func runTUI(args []string, stderr io.Writer) int {
 		// merged list.
 		AllTasks:    e.resolver.StickyAllTasks(),
 		SetAllTasks: e.resolver.SetStickyAllTasks,
+		// The user's config file, parsed here because internal/tui must not know
+		// there is one. Problems are dropped on this path on purpose: the popup
+		// is not where a typo gets reported — it has one title line and it is
+		// about to be covered by the task list. `tdo doctor` prints them.
+		Prefs: loadPrefs(),
 	}
 	jump, err := runTUIProgram(cfg)
 	if err != nil {
@@ -205,6 +211,29 @@ func homeDir() string {
 		return ""
 	}
 	return home
+}
+
+// loadPrefs reads the config file, degrading to the defaults at every step.
+//
+// A machine with no home dir, no config file, or an unreadable one gets exactly
+// config.Defaults() — the same as a machine with an empty file. Nothing here can
+// fail, because nothing here is worth failing a popup open for.
+func loadPrefs() config.Prefs {
+	prefs, _ := loadPrefsWithProblems()
+	return prefs
+}
+
+// loadPrefsWithProblems is loadPrefs plus what it could not use, for doctor.
+//
+// One function for both callers so the popup and the diagnostic can never
+// disagree about which file was read or what it meant — "doctor says the setting
+// is on, the popup behaves as if it is off" is the failure this shape prevents.
+func loadPrefsWithProblems() (config.Prefs, []config.Problem) {
+	path, err := config.DefaultPath()
+	if err != nil {
+		return config.Defaults(), nil
+	}
+	return config.Load(path)
 }
 
 // runDoctor exercises the whole stack end to end: it resolves the data dir,
@@ -270,6 +299,25 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "schema   %d (latest %d)\n", version, want)
 	fmt.Fprintf(stdout, "journal  %s\n", journal)
 	fmt.Fprintf(stdout, "tasks    %d pending, %d total\n", pending, total)
+
+	// The config, and anything in it that did not parse. Reported here because
+	// nothing else reports it: every bad line has already been resolved by
+	// falling back to a default, so a user whose setting "does nothing" has no
+	// other way to find out why. Printed even when the file is absent — "which
+	// path is it looking at" is the first question, and answering it costs a line.
+	prefs, problems := loadPrefsWithProblems()
+	configPath, err := config.DefaultPath()
+	if err != nil {
+		configPath = "unknown: " + err.Error()
+	}
+	fmt.Fprintf(stdout, "config   %s\n", configPath)
+	fmt.Fprintf(stdout, "         complete-to-bottom   %s\n", prefs.CompleteToBottom)
+	fmt.Fprintf(stdout, "         follow-on-complete   %t\n", prefs.FollowOnComplete)
+	fmt.Fprintf(stdout, "         follow-on-uncomplete %t\n", prefs.FollowOnUncomplete)
+	for _, p := range problems {
+		fmt.Fprintf(stdout, "         ! %s\n", p)
+	}
+
 	if version != want {
 		fmt.Fprintf(stderr, "tdo: database is at schema %d, want %d\n", version, want)
 		return 1

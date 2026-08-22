@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agusarias/tmux-todo/internal/config"
 	"github.com/agusarias/tmux-todo/internal/store"
 	"github.com/agusarias/tmux-todo/internal/task"
 )
@@ -40,7 +41,7 @@ func TestPartitionDoneGroupsDoneAtTheEndOfEachTier(t *testing.T) {
 		pendingRow(3, "g-pending-old", globalScope),
 	}
 
-	got := texts(partitionDone(in))
+	got := texts(partitionDone(in, alwaysBelow))
 	want := []string{
 		// session: pending in arrival order, then done newest-completed first.
 		"s-pending-new", "s-pending-old", "s-done-new", "s-done-old",
@@ -67,7 +68,7 @@ func TestPartitionDoneKeepsTierOrderAndMembership(t *testing.T) {
 		doneRow(7, "d2", dirScope, base.Add(-3*time.Hour)),
 		pendingRow(6, "g1", globalScope),
 	}
-	got := partitionDone(in)
+	got := partitionDone(in, alwaysBelow)
 
 	if len(got) != len(in) {
 		t.Fatalf("partitionDone returned %d rows, want %d", len(got), len(in))
@@ -112,7 +113,7 @@ func TestPartitionDoneWithAnAllDoneTier(t *testing.T) {
 		pendingRow(8, "d-pending", dirScope),
 		doneRow(7, "d-done", dirScope, base.Add(-2*time.Hour)),
 	}
-	got := texts(partitionDone(in))
+	got := texts(partitionDone(in, alwaysBelow))
 	want := []string{"s-done-new", "s-done-old", "d-pending", "d-done"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("partitionDone = %v, want %v — an all-done tier must stay its own tier", got, want)
@@ -133,7 +134,7 @@ func TestPartitionDoneToleratesANilDoneAt(t *testing.T) {
 		doneRow(9, "stamped", globalScope, base.Add(-time.Hour)),
 	}
 
-	got := texts(partitionDone(in))
+	got := texts(partitionDone(in, alwaysBelow))
 	want := []string{"pending", "stamped", "no timestamp"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("partitionDone = %v, want %v — a nil done_at sorts last, not first", got, want)
@@ -142,7 +143,7 @@ func TestPartitionDoneToleratesANilDoneAt(t *testing.T) {
 	// Two of them must not swap with each other either, or the sort is not
 	// stable and the order becomes arbitrary between runs.
 	second := task.Task{ID: 7, Text: "also none", Done: true, Scope: globalScope}
-	twice := texts(partitionDone([]task.Task{pendingRow(10, "pending", globalScope), nilDone, second}))
+	twice := texts(partitionDone([]task.Task{pendingRow(10, "pending", globalScope), nilDone, second}, alwaysBelow))
 	if twice[1] != "no timestamp" || twice[2] != "also none" {
 		t.Errorf("partitionDone = %v, want the two nil rows in arrival order", twice)
 	}
@@ -151,18 +152,18 @@ func TestPartitionDoneToleratesANilDoneAt(t *testing.T) {
 // TestPartitionDoneOnEmptyAndSingletons — the boundary cases, because the tier
 // walk is index arithmetic.
 func TestPartitionDoneOnEmptyAndSingletons(t *testing.T) {
-	if got := partitionDone(nil); len(got) != 0 {
+	if got := partitionDone(nil, alwaysBelow); len(got) != 0 {
 		t.Errorf("partitionDone(nil) = %v, want empty", got)
 	}
-	if got := partitionDone([]task.Task{}); len(got) != 0 {
+	if got := partitionDone([]task.Task{}, alwaysBelow); len(got) != 0 {
 		t.Errorf("partitionDone(empty) = %v, want empty", got)
 	}
 	one := []task.Task{pendingRow(1, "only", globalScope)}
-	if got := texts(partitionDone(one)); len(got) != 1 || got[0] != "only" {
+	if got := texts(partitionDone(one, alwaysBelow)); len(got) != 1 || got[0] != "only" {
 		t.Errorf("partitionDone(one pending) = %v", got)
 	}
 	oneDone := []task.Task{doneRow(1, "only", globalScope, time.Unix(1, 0))}
-	if got := texts(partitionDone(oneDone)); len(got) != 1 || got[0] != "only" {
+	if got := texts(partitionDone(oneDone, alwaysBelow)); len(got) != 1 || got[0] != "only" {
 		t.Errorf("partitionDone(one done) = %v", got)
 	}
 }
@@ -182,11 +183,16 @@ func TestMergedViewPutsDoneAtTheEndOfItsTier(t *testing.T) {
 		stampDone(t, db, id, base.Add(-time.Hour))
 	}
 
+	// The shipped defaults, not `always`: every done row here was completed an
+	// hour before the frozen `now` the popup opens at, which is exactly the set
+	// config.OnStart groups below. Testing the default configuration is worth
+	// more here than forcing the setting that makes the assertion easiest.
 	m := newLoaded(t, Config{
 		DB:     db,
 		Scopes: []task.Scope{sessionScope, dirScope, globalScope},
 		Home:   "/Users/x",
 		Now:    frozen(base),
+		Prefs:  config.Defaults(),
 	})
 
 	got := texts(m.tasks)
@@ -240,6 +246,9 @@ func TestAllTasksViewPutsDoneAtTheEndOfEachGroup(t *testing.T) {
 
 	cfg := allTasksConfig(db)
 	cfg.Now = frozen(base)
+	// As above: both rows were completed before this popup opened, so the
+	// default placement is what groups them.
+	cfg.Prefs = config.Defaults()
 	m := openAll(t, cfg)
 
 	// The group under test, found by scope rather than by index.
@@ -284,5 +293,200 @@ func TestNoSeparatorRowBetweenPendingAndDone(t *testing.T) {
 		if r.kind != rowTask {
 			t.Errorf("row %d is not a task row (kind %v); the merged view has no headers or separators", i, r.kind)
 		}
+	}
+}
+
+// alwaysBelow is config.Always as a belowRule: every done row sinks. It is what
+// every case above was written against, back when it was the only behaviour.
+var alwaysBelow = func(t task.Task) bool { return t.Done }
+
+// TestPartitionDoneNilRuleIsTheStoreOrder — config.Never, and also the reading of
+// "no rule was wired". The one arrangement this function cannot get wrong.
+func TestPartitionDoneNilRuleIsTheStoreOrder(t *testing.T) {
+	base := time.Unix(1_760_000_000, 0)
+	in := []task.Task{
+		pendingRow(10, "pending-new", sessionScope),
+		doneRow(9, "done-old", sessionScope, base.Add(-5*time.Hour)),
+		pendingRow(8, "pending-old", sessionScope),
+		doneRow(7, "done-new", sessionScope, base.Add(-time.Hour)),
+	}
+	got := texts(partitionDone(in, nil))
+	want := []string{"pending-new", "done-old", "pending-old", "done-new"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("partitionDone(nil rule) =\n  %v\nwant the store's order\n  %v", got, want)
+	}
+}
+
+// TestPartitionDoneOnStartMixedTier is the discriminating guard for config
+// .OnStart: the one test here that fails when the partition keys off Done rather
+// than off the caller's rule.
+//
+// The tier holds a pending row, a row done before the popup opened (which sinks)
+// and a row completed during this session (which must not). Partitioning by Done
+// drags the last one to the bottom with the first, which this catches. Verified
+// by mutation, 2026-08-22.
+func TestPartitionDoneOnStartMixedTier(t *testing.T) {
+	openedAt := time.Unix(1_760_000_000, 0)
+	below := onStartBelow(openedAt)
+
+	in := []task.Task{
+		doneRow(10, "done-this-session", sessionScope, openedAt.Add(time.Minute)),
+		pendingRow(9, "pending", sessionScope),
+		doneRow(8, "done-before-open", sessionScope, openedAt.Add(-time.Hour)),
+	}
+	got := texts(partitionDone(in, below))
+	want := []string{"done-this-session", "pending", "done-before-open"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("partitionDone(on-start) =\n  %v\nwant\n  %v", got, want)
+	}
+}
+
+// TestPartitionDoneOnStartTierWithNothingSinking pins the behaviour that a tier
+// nothing sinks out of comes back exactly as it arrived.
+//
+// Read the next sentence before trusting this test: it is **masked by the
+// short-circuit** and is not a discriminating guard. Break the partition so it
+// keys off Done and this case still passes, because `sinking == 0` returns the
+// tier before the broken loop can touch it. TestPartitionDoneOnStartMixedTier is
+// the one that fails. Both were run against that mutation on 2026-08-22, which is
+// the only reason the difference is known — the same relationship this repo
+// already documents between TestCursorReAnchorsOnTaskID and
+// TestCursorReAnchorsWhenRowsShift.
+//
+// It stays because the property is worth stating and it costs nothing, and
+// because a future change to the short-circuit would make it bite.
+func TestPartitionDoneOnStartTierWithNothingSinking(t *testing.T) {
+	openedAt := time.Unix(1_760_000_000, 0)
+	below := onStartBelow(openedAt)
+
+	in := []task.Task{
+		doneRow(10, "done-second", sessionScope, openedAt.Add(2*time.Minute)),
+		pendingRow(9, "pending", sessionScope),
+		doneRow(8, "done-first", sessionScope, openedAt.Add(time.Minute)),
+	}
+	got := texts(partitionDone(in, below))
+	want := []string{"done-second", "pending", "done-first"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("partitionDone(on-start, nothing sinking) =\n  %v\nwant it untouched\n  %v", got, want)
+	}
+}
+
+// TestOnStartBoundaryIsStrictlyBefore — timestamps are unix seconds, so a row
+// completed in the very second the popup opened is ambiguous. It stays inline:
+// right for your own keypress, harmless for another pane's.
+func TestOnStartBoundaryIsStrictlyBefore(t *testing.T) {
+	openedAt := time.Unix(1_760_000_000, 0)
+	below := onStartBelow(openedAt)
+
+	if below(doneRow(1, "same second", sessionScope, openedAt)) {
+		t.Error("a row completed at exactly openedAt sinks; want it to stay inline")
+	}
+	if !below(doneRow(2, "one second earlier", sessionScope, openedAt.Add(-time.Second))) {
+		t.Error("a row completed one second before the popup opened stays inline; want it below")
+	}
+	if below(doneRow(3, "one second later", sessionScope, openedAt.Add(time.Second))) {
+		t.Error("a row completed after the popup opened sinks; want it to stay inline")
+	}
+}
+
+// TestOnStartSinksANilDoneAt — a done row with no done_at cannot be shown to
+// belong to this session, and must not be dereferenced to find out.
+func TestOnStartSinksANilDoneAt(t *testing.T) {
+	below := onStartBelow(time.Unix(1_760_000_000, 0))
+	if !below(task.Task{ID: 1, Text: "no done_at", Done: true, Scope: sessionScope}) {
+		t.Error("a done row with a nil done_at stays inline; want it below")
+	}
+}
+
+// TestNoRuleSinksAPendingRow — every rule starts at Done. A pending row that
+// sank would produce a list nothing else in this package expects.
+func TestNoRuleSinksAPendingRow(t *testing.T) {
+	pending := pendingRow(1, "pending", sessionScope)
+	rules := map[string]belowRule{
+		"always":   alwaysBelow,
+		"on-start": onStartBelow(time.Unix(1_760_000_000, 0)),
+	}
+	for name, below := range rules {
+		if below(pending) {
+			t.Errorf("%s sinks a pending row", name)
+		}
+	}
+}
+
+// onStartBelow is config.OnStart's rule, built from a fixed openedAt so these
+// cases stay pure. Model.belowRule is what wires the real one, and
+// TestBelowRuleMatchesThePlacementSetting is what proves the two agree.
+func onStartBelow(openedAt time.Time) belowRule {
+	return func(t task.Task) bool {
+		return t.Done && (t.DoneAt == nil || t.DoneAt.Before(openedAt))
+	}
+}
+
+// TestBelowRuleMatchesThePlacementSetting closes the seam between the setting
+// and the rule: a test that builds its own predicate proves nothing about which
+// one Model.belowRule hands to partitionDone.
+func TestBelowRuleMatchesThePlacementSetting(t *testing.T) {
+	openedAt := time.Unix(1_760_000_000, 0)
+	beforeOpen := doneRow(1, "before", sessionScope, openedAt.Add(-time.Hour))
+	thisSession := doneRow(2, "during", sessionScope, openedAt.Add(time.Hour))
+	pending := pendingRow(3, "pending", sessionScope)
+
+	tests := []struct {
+		placement          config.Placement
+		wantBefore, during bool
+	}{
+		{config.Always, true, true},
+		{config.Never, false, false},
+		{config.OnStart, true, false},
+		// The zero value is not one of the three and must behave as Never.
+		{config.Placement(""), false, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.placement), func(t *testing.T) {
+			m := Model{
+				cfg:      Config{Prefs: config.Prefs{CompleteToBottom: tt.placement}},
+				openedAt: openedAt,
+			}
+			below := m.belowRule()
+			// A nil rule is how "nothing sinks" is expressed, so normalise it
+			// rather than special-casing every assertion below.
+			if below == nil {
+				below = func(task.Task) bool { return false }
+			}
+			if got := below(beforeOpen); got != tt.wantBefore {
+				t.Errorf("row done before open: below = %v, want %v", got, tt.wantBefore)
+			}
+			if got := below(thisSession); got != tt.during {
+				t.Errorf("row done this session: below = %v, want %v", got, tt.during)
+			}
+			if below(pending) {
+				t.Error("a pending row sinks")
+			}
+		})
+	}
+}
+
+// TestNewStampsOpenedAt — belowRule's on-start arm is measured against it, so a
+// model whose openedAt was never set would treat every row as done-before-open.
+func TestNewStampsOpenedAt(t *testing.T) {
+	now := time.Unix(1_760_000_000, 0)
+	m := New(Config{Now: frozen(now)})
+	if !m.openedAt.Equal(now) {
+		t.Errorf("openedAt = %v, want %v", m.openedAt, now)
+	}
+}
+
+// TestDoneSinceDoesNotConsultOpenedAt is a regression guard with a history: the
+// max() against openedAt is what made store.DoneRetention dead code for four
+// tasks, and this task puts openedAt back on the model for an unrelated reason.
+// The field being in reach again is exactly when that bug could come back.
+func TestDoneSinceDoesNotConsultOpenedAt(t *testing.T) {
+	now := time.Unix(1_760_000_000, 0)
+	m := New(Config{Now: frozen(now)})
+	m.openedAt = now.Add(-72 * time.Hour) // absurd, and must change nothing
+
+	if want := now.Add(-store.DoneRetention); !m.doneSince().Equal(want) {
+		t.Errorf("doneSince() = %v, want %v — it must depend on the clock alone", m.doneSince(), want)
 	}
 }
